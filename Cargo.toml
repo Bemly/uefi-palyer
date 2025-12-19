@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 log = "0.4.29"
+qoicoubeh = { version = "0.5.0", default-features = false, features = ["alloc"] }
 uefi = { version = "0.36.1", features = ["logger","alloc","global_allocator","panic_handler"] }
