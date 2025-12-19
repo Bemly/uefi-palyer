@@ -16,66 +16,16 @@ use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
 fn main() -> Status {
     uefi::helpers::init().unwrap();
 
-    let mut root_dir = get_image_file_system(image_handle())
-        .expect("Failed to get FAT protocol")
-        .open_volume()
-        .expect("Failed to open EFI partition");
+    let width = 19200;
+    let height = 10800;
+    let pixel_count = width * height;
+    let bytes_needed = pixel_count * core::mem::size_of::<BltPixel>();
 
-    info!("FAT protocol opened");
+    info!("正在申请内存: {} 像素, 约 {} KB", pixel_count, bytes_needed / 1024);
 
-    let mut file =root_dir
-        .open(cstr16!("test2.qoi"), FileMode::Read, FileAttribute::empty())
-        .expect("Failed to open test.qoi")
-        .into_regular_file()
-        .expect("test.qoi is not a regular file");
+    let mut blt_buf = vec![BltPixel::new(0,0,0); pixel_count];
 
-    info!("test.qoi opened");
-
-    // 获取文件信息
-    let mut file_info = [0u8; 128];
-    let file_info = file
-        .get_info::<FileInfo>(&mut file_info)
-        .expect("file name too long");
-
-    info!("file info: {:?}", file_info);
-
-    // 文件内容缓存区作为输入流
-    let mut qoi_buf = vec![0u8; file_info.file_size() as usize];
-    file.read(&mut qoi_buf).expect("Failed to read test.qoi");
-
-    info!("test.qoi decoded");
-
-    // 解码
-    let (header, rgba_buf) = qoi::decode_to_vec(&qoi_buf)
-        .expect("Failed to decode test.qoi");
-
-    info!("qoi header: {:?}", header);
-
-    // 与显示协议通信s
-    let gop = get_handle_for_protocol::<GraphicsOutput>()
-        .expect("Failed to get GOP protocol");
-    let mut gop = open_protocol_exclusive::<GraphicsOutput>(gop)
-        .expect("Failed to open GOP protocol");
-
-    // 将RGBA 32bit转换为BGR 24bit
-    // let mut blt_buf =
-    //     vec![BltPixel::new(0,0,0); (header.width * header.height) as usize];
-    // for (chunk, pixel) in rgba_buf.chunks_exact(4).zip(blt_buf.iter_mut()) {
-    //     *pixel = BltPixel::new(chunk[0], chunk[1], chunk[2]);
-    // }
-
-    let blt_buf = rgba_buf
-        .chunks_exact(4)
-        .map(|c| BltPixel::new(c[0], c[1], c[2]))
-        .collect::<Vec<BltPixel>>();
-
-    // 绘图
-    gop.blt(BltOp::BufferToVideo {
-        buffer: &blt_buf,
-        src: BltRegion::Full,
-        dest: (0, 0),
-        dims: (header.width as usize, header.height as usize),
-    }).expect("Failed to display picture");
+    info!("succs"); // 如果闪退，这行就不会打印
 
 
     stall(Duration::from_mins(1));
