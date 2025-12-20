@@ -3,77 +3,37 @@
 
 extern crate alloc;
 
-use alloc::vec;
+mod fs;
+mod graphics;
+
 use alloc::vec::Vec;
 use uefi::prelude::*;
+use uefi::proto::console::gop::BltPixel;
 use core::time::Duration;
 use log::info;
-use uefi::boot::{get_handle_for_protocol, get_image_file_system, image_handle, open_protocol_exclusive, stall};
-use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
-use uefi::proto::media::file::{File, FileAttribute, FileInfo, FileMode};
 
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().unwrap();
+    info!("UEFI Booting...");
 
-    let mut root_dir = get_image_file_system(image_handle())
-        .expect("Failed to get FAT protocol")
-        .open_volume()
-        .expect("Failed to open EFI partition");
+    // 1. 加载文件
+    let qoi_data = fs::read_file(cstr16!("test2.qoi"));
 
-    info!("FAT protocol opened");
+    // 2. 解码图像
+    let (header, rgba_buf) = qoi::decode_to_vec(&qoi_data)
+        .expect("Decode failed");
 
-    let mut file =root_dir
-        .open(cstr16!("test.qoi"), FileMode::Read, FileAttribute::empty())
-        .expect("Failed to open test.qoi")
-        .into_regular_file()
-        .expect("test.qoi is not a regular file");
-
-    info!("test.qoi opened");
-
-    // 获取文件信息
-    let mut file_info = [0u8; 128];
-    let file_info = file
-        .get_info::<FileInfo>(&mut file_info)
-        .expect("file name too long");
-
-    info!("file info");
-
-    // 文件内容缓存区作为输入流
-    let mut qoi_buf = vec![0u8; file_info.file_size() as usize];
-    file.read(&mut qoi_buf).expect("Failed to read test.qoi");
-
-    info!("test.qoi decoded");
-
-    // 解码
-    let (header, rgba_buf) = qoi::decode_to_vec(&qoi_buf)
-        .expect("Failed to decode test.qoi");
-
-    info!("qoi decoded, {:?}",  header);
-
-    // 与显示协议通信s
-    let gop = get_handle_for_protocol::<GraphicsOutput>()
-        .expect("Failed to get GOP protocol");
-    let mut gop = open_protocol_exclusive::<GraphicsOutput>(gop)
-        .expect("Failed to open GOP protocol");
-
-    info!("GOP opened");
-
-    // 将RGBA 32bit转换为BGR 24bit
-    let blt_buf = rgba_buf
-        .chunks_exact(header.channels.as_u8() as usize) // 筛选透明通道
+    // 3. 转换像素格式 (Iterator 适配器模式)
+    let blt_buf: Vec<BltPixel> = rgba_buf
+        .chunks_exact(header.channels.as_u8() as usize)
         .map(|c| BltPixel::new(c[0], c[1], c[2]))
-        .collect::<Vec<BltPixel>>();
+        .collect();
 
-    // 绘图
-    gop.blt(BltOp::BufferToVideo {
-        buffer: &blt_buf,
-        src: BltRegion::Full,
-        dest: (0, 0),
-        dims: (header.width as usize, header.height as usize),
-    }).expect("Failed to display picture");
+    // 4. 渲染
+    let mut screen = graphics::Screen::new();
+    screen.draw_image(header.width, header.height, &blt_buf);
 
-
-    stall(Duration::from_mins(1));
+    boot::stall(Duration::from_secs(10));
     Status::SUCCESS
 }
