@@ -9,6 +9,7 @@ pub type Result<Output = (), ErrData = ()> = core::result::Result<Output, NyaSta
 #[derive(Debug)]
 pub enum NyaStatus<Data: Debug = ()> {
     Uefi(uefi::Error<Data>),
+    FromStrWithBufError,
     Qoi(qoi::Error),
     NotRegularFile,
     _Reserve,

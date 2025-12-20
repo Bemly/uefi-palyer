@@ -7,12 +7,16 @@ mod fs;
 mod graphics;
 mod error;
 
+use alloc::format;
 use alloc::vec::Vec;
 use uefi::prelude::*;
 use uefi::proto::console::gop::BltPixel;
 use core::time::Duration;
 use log::info;
-use crate::error::{handle_fatal, Result};
+use uefi::CStr16;
+use crate::error::{handle_fatal, NyaStatus, Result};
+use crate::fs::Fs;
+use crate::graphics::Screen;
 
 #[entry]
 fn main() -> Status {
@@ -25,8 +29,26 @@ fn run() -> Result {
     uefi::helpers::init()?;
     info!("UEFI Booting...");
 
+    let mut fs = Fs::new()?;
+    let mut path_buf = [0u16; 128];
+    let mut screen = Screen::new()?;
+    loop {
+        for i in 1..98 {
+            let path = format!("anime\\{:04}.qoi", i);
+            let path = CStr16::from_str_with_buf(&path, &mut path_buf)
+                .map_err(|_| NyaStatus::FromStrWithBufError)?;
+            draw(&mut fs, &mut screen, path)?;
+            boot::stall(Duration::from_millis(1000 / 90));
+        }
+    }
+
+
+    Ok(())
+}
+
+fn draw(fs: &mut Fs, screen: &mut Screen, path: &CStr16) -> Result {
     // 1. 加载文件
-    let qoi_data = fs::read_file(cstr16!("test2.qoi"))?;
+    let qoi_data = fs.read_file(path)?;
 
     // 2. 解码图像
     let (header, rgba_buf) = qoi::decode_to_vec(&qoi_data)?;
@@ -38,7 +60,6 @@ fn run() -> Result {
         .collect();
 
     // 4. 渲染
-    let mut screen = graphics::Screen::new()?;
     screen.draw_image(header.width, header.height, &blt_buf)?;
 
     Ok(())
