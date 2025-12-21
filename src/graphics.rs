@@ -24,4 +24,17 @@ impl Screen {
             dims: (width as usize, height as usize),
         })?)
     }
+
+    pub fn clear(&mut self) -> Result {
+        let info = self.gop.current_mode_info();
+        let (width, height) = info.resolution();
+
+        // 使用 VideoFill 操作，这比传输像素数组快得多
+        Ok(self.gop.blt(BltOp::VideoFill {
+            // 黑色像素：Red=0, Green=0, Blue=0
+            color: BltPixel::new(0, 0, 0),
+            dest: (0, 0),
+            dims: (width, height),
+        })?)
+    }
 }

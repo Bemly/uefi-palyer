@@ -1,8 +1,10 @@
 use core::fmt::Debug;
-use uefi::boot::stall;
+use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, stall};
 use core::time::Duration;
 use uefi::println;
-
+use uefi::proto::console::gop::GraphicsOutput;
+use uefi::proto::console::text::Output;
+use crate::graphics::Screen;
 
 pub type Result<Output = (), ErrData = ()> = core::result::Result<Output, NyaStatus<ErrData>>;
 
@@ -33,7 +35,15 @@ impl From<qoi::Error> for NyaStatus {
 
 
 // 统一的错误处理入口：打印并挂起
-pub fn handle_fatal(err: NyaStatus) -> ! {
+pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
+    let _ = screen.clear();
+    drop(screen);
+    let handle = get_handle_for_protocol::<Output>().expect("Failed to get output protocol");
+    let mut text = open_protocol_exclusive::<Output>(handle).expect("Failed to open output protocol");
+    let _ = text.reset(false);
+
+    println!("NyaOS has encountered a fatal error.");
+
     match err {
         NyaStatus::Qoi(err) => println!("QOI error: {}", err),
         _ => println!("FATAL ERROR: {:?}", err),

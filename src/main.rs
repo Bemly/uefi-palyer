@@ -20,17 +20,18 @@ use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer, Video
 
 #[entry]
 fn main() -> Status {
-    run().unwrap_or_else(|e| handle_fatal(e));
+    uefi::helpers::init().expect("Failed to initialize UEFI");
+
+    let mut screen = Screen::new().expect("Failed to create screen");
+    run(&mut screen).unwrap_or_else(|e| handle_fatal(e, screen));
+
     boot::stall(Duration::from_secs(10));
     Status::SUCCESS
 }
 
-fn run() -> Result {
-    uefi::helpers::init()?;
-
+fn run(screen: &mut Screen) -> Result {
 
     let mut fs = Fs::new()?;
-    let mut screen = Screen::new()?;
     let mut file = fs.open_file(cstr16!("anime\\video.qois"))?;
     let mut qoi = QoiFrameBuffer::new(1280 * 720);
     let mut raw = RawFrameBuffer::new(1280 * 720);
@@ -39,7 +40,7 @@ fn run() -> Result {
     loop {
         // draw(&mut fs, &mut file, &mut screen, &mut qoi, &mut raw, &mut blt)?;
         // draw_all_mem(&mut video, &mut screen, &mut qoi, &mut raw, &mut blt)?;
-        draw_all_mem_zero_copy(&mut video, &mut screen, &mut qoi, &mut blt)?;
+        draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;
         boot::stall(Duration::from_millis(1000 / 90));
     }
 
