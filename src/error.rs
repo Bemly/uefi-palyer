@@ -38,9 +38,8 @@ impl From<qoi::Error> for NyaStatus {
 pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
     let _ = screen.clear();
     drop(screen);
-    let handle = get_handle_for_protocol::<Output>().expect("Failed to get output protocol");
-    let mut text = open_protocol_exclusive::<Output>(handle).expect("Failed to open output protocol");
-    let _ = text.reset(false);
+    let _ = uefi::helpers::init();
+
 
     println!("NyaOS has encountered a fatal error.");
 
