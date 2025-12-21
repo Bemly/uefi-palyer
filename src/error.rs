@@ -1,3 +1,4 @@
+use alloc::format;
 use core::fmt::Debug;
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, stall};
 use core::time::Duration;
@@ -35,20 +36,17 @@ impl From<qoi::Error> for NyaStatus {
 
 
 // 统一的错误处理入口：打印并挂起
-pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
+pub fn handle_fatal(err: NyaStatus, screen: &mut Screen) -> ! {
     let _ = screen.clear();
-    drop(screen);
-    let _ = uefi::helpers::init();
 
-
-    println!("NyaOS has encountered a fatal error.");
+    screen.draw_string("NyaOS has encountered a fatal error.");
 
     match err {
-        NyaStatus::Qoi(err) => println!("QOI error: {}", err),
-        _ => println!("FATAL ERROR: {:?}", err),
+        NyaStatus::Qoi(err) => screen.draw_string(format!("QOI error: {}", err).as_str()),
+        _ => screen.draw_string(format!("FATAL ERROR: {:?}", err).as_str()),
     }
 
-    println!("System will stall for 1 minute before returning.");
+    screen.draw_string("System will stall for 1 minute before returning.");
 
     // 停顿一分钟，方便用户看清屏幕上的错误
     stall(Duration::from_mins(2));
