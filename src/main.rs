@@ -8,200 +8,115 @@ mod graphics;
 mod error;
 mod video;
 
+use core::ffi::c_void;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use uefi::prelude::*;
-use uefi::proto::console::gop::BltPixel;
 use core::time::Duration;
-use uefi::CStr16;
-use uefi::boot::set_watchdog_timer;
-use uefi::proto::media::file::RegularFile;
-use crate::error::{handle_fatal, Result};
-use crate::fs::Fs;
-use crate::graphics::Screen;
-use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer, VideoMemory, VideoMemoryRaw};
+use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive};
+use uefi::println;
+use uefi::proto::pi::mp::MpServices;
+use log::{error, info, warn};
+use uefi::proto::console::gop::{BltOp, BltPixel, GraphicsOutput};
+
+
+// 1. 定义在 AP (应用处理器) 上执行的并行任务
+// 必须使用 extern "efiapi" 以符合 UEFI 调用约定
+extern "efiapi" fn ap_count_task(arg: *mut c_void) {
+    if arg.is_null() { return; }
+
+    // 安全地转换指针并增加计数
+    let counter = unsafe { &*(arg as *const AtomicUsize) };
+
+    let handle =  get_handle_for_protocol::<GraphicsOutput>()
+        .expect("Failed to open Graphics Output protocol");
+    let mut gop = open_protocol_exclusive::<GraphicsOutput>(handle)
+        .expect("Failed to open Graphics Output protocol");
+    let info = gop.current_mode_info();
+    let (width, height) = info.resolution();
+    gop.blt(BltOp::VideoFill {
+        // 黑色像素：Red=0, Green=0, Blue=0
+        color: BltPixel::new(255, 0, 0),
+        dest: (0, 0),
+        dims: (width, height),
+    }).expect("Failed to fill screen with black");
+    counter.fetch_add(1, Ordering::SeqCst);
+}
 
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().expect("Failed to init UEFI");
 
-    let mut screen = Screen::new().expect("Failed to create screen");
-    run(&mut screen).unwrap_or_else(|e| handle_fatal(e, &mut screen));
+    // let mut screen = Screen::new().expect("Failed to create screen");
+    // video_run(&mut screen).unwrap_or_else(|e| handle_fatal(e, &mut screen));
 
-    boot::stall(Duration::from_secs(10));
+    println!("Hello, World!");
+
+    info!("=== Starting Multi-Processor (MP) Test ===");
+
+    // 2. 查找 MP Services 协议
+    let mp_handle = match get_handle_for_protocol::<MpServices>() {
+        Ok(handle) => handle,
+        Err(_) => {
+            error!("Error: MP Services Protocol not supported by this firmware.");
+            return Status::UNSUPPORTED;
+        }
+    };
+
+    let mp_services = open_protocol_exclusive::<MpServices>(mp_handle)
+        .expect("Failed to open MP Services protocol");
+
+    // 3. 获取处理器详细信息
+    let num_proc = mp_services.get_number_of_processors()
+        .expect("Failed to get processor count");
+
+    info!("Total processors detected: {}", num_proc.total);
+    info!("Enabled processors: {}", num_proc.enabled);
+
+    // 如果系统只有一个核心，则没有 AP 需要启动
+    if num_proc.enabled < 2 {
+        warn!("Single-core system detected. Skipping parallel task execution.");
+        return Status::SUCCESS;
+    }
+
+    // 4. 准备原子计数器
+    let counter = AtomicUsize::new(0);
+    let arg_ptr = &counter as *const _ as *mut c_void;
+
+    info!("Dispatching task to all Application Processors (APs)...");
+
+    // 5. 启动所有 AP 并执行任务
+    // - single_thread: false (表示并行执行)
+    // - procedure: 任务函数指针
+    // - procedure_argument: 传给任务函数的参数指针
+    if let Err(e) = mp_services.startup_all_aps(
+        false,
+        ap_count_task,
+        arg_ptr,
+        None,
+        None
+    ) {
+        error!("Failed to start APs: {:?}", e);
+        return e.status();
+    }
+
+    // 6. 最终验证结果
+    // 注意：startup_all_aps 只在辅助核心 (AP) 上运行
+    // 当前正在运行 main 函数的核心 (BSP) 不会执行该任务
+    let final_count = counter.load(Ordering::SeqCst);
+    let expected_count = num_proc.enabled - 1;
+
+    info!("Execution completed!");
+    info!("AP tasks finished: {}", final_count);
+    info!("Expected count: {}", expected_count);
+
+    if final_count == expected_count {
+        info!("Result: SUCCESS - All APs responded.");
+    } else {
+        warn!("Result: MISMATCH - Some APs failed to increment the counter.");
+    }
+
+    boot::stall(Duration::from_mins(2));
     Status::SUCCESS
 }
 
-fn run(screen: &mut Screen) -> Result {
 
-    // 关闭看门狗，如果不行之后写定时喂狗
-    set_watchdog_timer(0, 0, None)?;
-
-    // const WIDTH: usize = 1920;
-    // const HEIGHT: usize = 1080;
-    const WIDTH: usize = 1280;
-    const HEIGHT: usize = 720;
-    const SIZE: usize = WIDTH * HEIGHT;
-
-    let mut fs = Fs::new()?;
-    let mut file = fs.open_file(cstr16!("anime\\video.qois"))?;
-    let mut qoi = QoiFrameBuffer::new(SIZE);
-    let mut raw = RawFrameBuffer::new(SIZE);
-    let mut blt = BltFrameBuffer::new(SIZE);
-    // let mut video = VideoMemory::new(file)?;
-    let mut video_raw = VideoMemoryRaw::new(file)?;
-    loop {
-        // draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
-        // draw_all_mem(&mut video, screen, &mut qoi, &mut raw, &mut blt)?;
-        // draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?; // UNSAFE!!
-        screen.draw_all_mem_raw_zero_copy(&mut video_raw, WIDTH, HEIGHT);// UNSAFE!!
-        // boot::stall(Duration::from_millis(1000 / 90));
-    }
-
-    // Ok(())
-}
-
-fn draw_once(fs: &mut Fs, screen: &mut Screen, path: &CStr16, blt_buf: &mut [BltPixel]) -> Result {
-    // 加载文件
-    let qoi_data = fs.read_file(path)?;
-
-    // 解码图像
-    let (header, rgba_buf) = qoi::decode_to_vec(&qoi_data)?;
-
-    // 转换像素格式
-    blt_buf.iter_mut()
-        .zip(rgba_buf.chunks_exact(header.channels.as_u8() as usize))
-        .for_each(|(dest, src)| {
-            *dest = BltPixel::new(src[0], src[1], src[2]);
-        });
-
-    // 渲染
-    screen.draw_image(header.width, header.height, &blt_buf)?;
-
-    Ok(())
-}
-
-fn draw_all_mem(
-    video: &mut VideoMemory,
-    screen: &mut Screen,
-    qoi: &mut QoiFrameBuffer,
-    raw: &mut RawFrameBuffer,
-    blt: &mut BltFrameBuffer
-) -> Result {
-    if video.next_frame(&mut qoi.0) {
-        raw.header = loop {
-            match qoi::decode_to_buf(&mut raw.pixels, &qoi.0) {
-                Ok(header) => break header,
-                Err(qoi::Error::OutputBufferTooSmall { required, .. }) => {
-                    raw.pixels.resize(required, 0)
-                }
-                // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-                Err(e) => return Ok(()),
-            }
-        };
-
-        let pixel_count = raw.get_size();
-        let step = raw.header.channels.as_u8() as usize;
-
-        // 这里的 zip 配合 iter_mut 是目前最稳妥的写法
-        raw.pixels[..pixel_count * step]
-            .chunks_exact(step)
-            .zip(blt.0[..pixel_count].iter_mut())
-            .for_each(|(r, b)| {
-                b.red = r[0];
-                b.green = r[1];
-                b.blue = r[2];
-            });
-
-        // 4. 显示
-        screen.draw_image(raw.header.width, raw.header.height, &blt.0)?;
-    } else {
-        // 读完了，重置指针实现循环播放
-        video.rewind();
-    }
-
-    Ok(())
-}
-
-// 目前只支持4通道互转
-fn draw_all_mem_zero_copy(
-    video: &mut VideoMemory,
-    screen: &mut Screen,
-    qoi: &mut QoiFrameBuffer,
-    blt: &mut BltFrameBuffer
-) -> Result {
-    if video.next_frame(&mut qoi.0) {
-        // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-        let Ok(header) = qoi::decode_header(&qoi.0) else { return Ok(()) };
-        let pixel_count = (header.width * header.height) as usize;
-
-        if blt.0.len() < pixel_count {
-            blt.0.resize(pixel_count, BltPixel::new(0,0,0));
-        }
-
-        // 直接解码到 [R, G, B, A, R, G, B, A...]
-        // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-        let Ok(_) = qoi::decode_to_buf(as_u8_slice_mut(&mut blt.0[..pixel_count]), &qoi.0)
-        else { return Ok(()) };
-
-        // 交换 R 和 B
-        for pixel in blt.0[..pixel_count].iter_mut() {
-            core::mem::swap(&mut pixel.red, &mut pixel.blue);
-        }
-
-        screen.draw_image(header.width, header.height, &blt.0)?;
-    } else {
-        video.rewind();
-    }
-    Ok(())
-}
-
-fn as_u8_slice_mut(slice: &mut [BltPixel]) -> &mut [u8] {
-    let len = slice.len() * core::mem::size_of::<BltPixel>();
-    unsafe {
-        // 起始地址（指针转换） 总字节长度
-        core::slice::from_raw_parts_mut(slice.as_mut_ptr() as *mut u8, len)
-    }
-}
-
-fn draw(
-    fs: &mut Fs,
-    file: &mut RegularFile,
-    screen: &mut Screen,
-    qoi: &mut QoiFrameBuffer,
-    raw: &mut RawFrameBuffer,
-    blt: &mut BltFrameBuffer
-) -> Result {
-    // 读文件流
-    if fs.read_frame_next(file, &mut qoi.0)? {
-        // 解码
-        raw.header = loop {
-            match qoi::decode_to_buf(&mut raw.pixels, &qoi.0) {
-                Ok(header) => break header,
-                Err(qoi::Error::OutputBufferTooSmall { required, .. }) => {
-                    raw.pixels.resize(required, 0)
-                }
-                // TODO:严重错误 真机上会出现数据错位的情况,概率极大
-                // qoi::Error::InvalidPadding
-                // qemu无问题 不知道怎么解决 暂时丢帧处理
-                Err(e) => return Ok(()),
-            }
-        };
-
-        // 转换
-        // 只取当前帧需要的切片范围，避免处理旧数据
-        let step = raw.header.channels.as_u8() as usize;
-        let raw_data = raw.pixels[..raw.get_size() * step].chunks_exact(step);
-        let blt_data = &mut blt.0[..raw.get_size()];
-        for (r, b) in raw_data.zip(blt_data.iter_mut()) {
-            b.red = r[0];
-            b.green = r[1];
-            b.blue = r[2];
-        }
-
-        screen.draw_image(raw.header.width, raw.header.height, &blt.0)?;
-    } else {
-        // 从头读
-        file.set_position(0)?;
-    }
-
-    Ok(())
-}

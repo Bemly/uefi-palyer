@@ -1,8 +1,8 @@
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtocol};
-use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
+use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
-use crate::video::buffer::VideoMemoryRaw;
+use crate::video::decoder::VideoMemoryRaw;
 
 pub struct Screen {
     gop: ScopedProtocol<GraphicsOutput>,

@@ -71,6 +71,7 @@ name = "myuefi"
 version = "0.1.0"
 dependencies = [
  "less-avc",
+ "log",
  "qoicoubeh",
  "shiguredo_mp4",
  "uefi",
