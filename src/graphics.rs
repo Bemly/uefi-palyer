@@ -2,6 +2,7 @@ use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtoco
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
+use crate::video::buffer::VideoMemoryRaw;
 
 pub struct Screen {
     gop: ScopedProtocol<GraphicsOutput>,
@@ -40,6 +41,7 @@ impl Screen {
         })?)
     }
 
+    // 临时用来调试的 功能补全 不要用
     pub fn draw_string(&mut self, text: &str) {
         let mut x = 0;
         let y = 0;
@@ -81,5 +83,23 @@ impl Screen {
         }
 
         self.stdout += 18;
+    }
+
+    pub fn draw_all_mem_raw_zero_copy(&mut self, video: &mut VideoMemoryRaw, width: usize, height: usize) {
+        // 获取下一帧的原始像素引用
+        if let Some(pixel_slice) = video.next_frame() {
+            // 直接绘制到屏幕
+            // 假设你的屏幕分辨率和视频一致，从 (0,0) 开始画
+            self.gop.blt(
+                BltOp::BufferToVideo {
+                    buffer: pixel_slice,
+                    src: BltRegion::Full,
+                    dest: (0, 0),
+                    dims: (width, height),
+                }
+            ).ok();
+        } else {
+            video.rewind();
+        }
     }
 }
