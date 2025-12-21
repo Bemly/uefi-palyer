@@ -38,10 +38,10 @@ fn run(screen: &mut Screen) -> Result {
     let mut blt = BltFrameBuffer::new(1280 * 720);
     let mut video = VideoMemory::new(file)?;
     loop {
-        // draw(&mut fs, &mut file, &mut screen, &mut qoi, &mut raw, &mut blt)?;
-        // draw_all_mem(&mut video, &mut screen, &mut qoi, &mut raw, &mut blt)?;
-        draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;
-        boot::stall(Duration::from_millis(1000 / 90));
+        // draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
+        draw_all_mem(&mut video, screen, &mut qoi, &mut raw, &mut blt)?;
+        // draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;
+        // boot::stall(Duration::from_millis(1000 / 90));
     }
 
 
@@ -177,7 +177,10 @@ fn draw(
                 Err(qoi::Error::OutputBufferTooSmall { required, .. }) => {
                     raw.pixels.resize(required, 0)
                 }
-                Err(e) => Err(e)?,
+                // TODO:严重错误 真机上会出现数据错位的情况,概率极大
+                // qoi::Error::InvalidPadding
+                // qemu无问题 不知道怎么解决 暂时丢帧处理
+                Err(e) => return Ok(()),
             }
         };
 

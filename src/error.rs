@@ -1,10 +1,7 @@
 use alloc::format;
 use core::fmt::Debug;
-use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, stall};
+use uefi::boot::stall;
 use core::time::Duration;
-use uefi::println;
-use uefi::proto::console::gop::GraphicsOutput;
-use uefi::proto::console::text::Output;
 use crate::graphics::Screen;
 
 pub type Result<Output = (), ErrData = ()> = core::result::Result<Output, NyaStatus<ErrData>>;
@@ -39,7 +36,7 @@ impl From<qoi::Error> for NyaStatus {
 pub fn handle_fatal(err: NyaStatus, screen: &mut Screen) -> ! {
     let _ = screen.clear();
 
-    screen.draw_string("NyaOS has encountered a fatal error.");
+    screen.draw_string("KERNEL PANIC!");
 
     match err {
         NyaStatus::Qoi(err) => screen.draw_string(format!("QOI error: {}", err).as_str()),

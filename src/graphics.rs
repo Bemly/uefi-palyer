@@ -80,6 +80,6 @@ impl Screen {
             // 进阶提示：你可以在这里加一个检查，如果 x 超过屏幕宽度就自动换行
         }
 
-        self.stdout += 8;
+        self.stdout += 18;
     }
 }
