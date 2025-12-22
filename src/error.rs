@@ -30,20 +30,63 @@ impl From<qoi::Error> for NyaStatus {
     fn from(e: qoi::Error) -> Self { NyaStatus::Qoi(e) }
 }
 
-
-
-// 统一的错误处理入口：打印并挂起
-pub fn handle_fatal(err: NyaStatus, screen: &mut Screen) -> ! {
+// 垫底的错误处理，至少是安全的输出内容（大雾
+pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
     let _ = screen.clear();
 
-    screen.draw_string("KERNEL PANIC!");
-
-    match err {
-        NyaStatus::Qoi(err) => screen.draw_string(format!("QOI error: {}", err).as_str()),
-        _ => screen.draw_string(format!("FATAL ERROR: {:?}", err).as_str()),
+    macro_rules! println {
+        ($($arg:tt)*) => { screen.draw_str(&alloc::format!($($arg)*)) }
     }
 
-    screen.draw_string("System will stall for 1 minute before returning.");
+
+    println!("KERNEL PANIC!");
+
+    match err {
+        NyaStatus::Qoi(err) => println!("QOI error: {}", err),
+        _ => println!("FATAL ERROR: {:?}", err),
+    }
+
+    println!("System will stall for 1 minute before returning.");
+
+    stall(Duration::from_mins(2));
+
+    panic!("Unrecoverable error occurred.");
+}
+
+#[allow(unused)] // 宏的大手
+pub fn _handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
+    use embedded_graphics::{
+        prelude::{Point, RgbColor},
+        mono_font::{
+            ascii::FONT_10X20, MonoTextStyle
+        },
+        pixelcolor::Rgb888,
+        text::Text, Drawable
+    };
+    use embedded_graphics_gop::fb::FbDrawTarget;
+
+    // emg 会锁住GOP协议,最好还是用自己的,这里崩溃导出 所以让出所有权
+    // 1.Screen生命周期不好处理,2.每次新建画布都会覆盖掉内容=>故这里为高耦合设计
+    let mut canva = FbDrawTarget::new(screen.get_gop());
+    const OFFSET: i32 = 18;
+    let mut offset = OFFSET;
+
+    macro_rules! println {
+        ($($arg:tt)*) => {{
+            let _ = Text::new(&alloc::format!($($arg)*),
+                Point::new(0, offset),
+                MonoTextStyle::new(&FONT_10X20, Rgb888::WHITE)
+            ).draw(&mut canva);
+            offset += OFFSET;
+        }}
+    }
+
+    match err {
+        NyaStatus::Qoi(err) => println!("QOI error: {}", err),
+        _ => println!("FATAL ERROR: {:?}", err),
+    };
+
+    println!("System will stall for 1 minute before returning.");
 
     // 停顿一分钟，方便用户看清屏幕上的错误
     stall(Duration::from_mins(2));

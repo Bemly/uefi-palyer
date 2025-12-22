@@ -18,6 +18,8 @@ impl Fs {
     }
 
     // 没有方法重载 没有可选参数 没有默认形参值！草了
+    // <- 给古老的我:对于编译时确定的值可以用宏($($arg:tt)*)来实现可变参数
+    // <- 给过去的我:骗你的，format_args是硬编码
     #[inline]
     pub fn open_file(&mut self, path: &CStr16) -> Result<RegularFile> {
         self.open_file_mode(path, FileMode::Read)

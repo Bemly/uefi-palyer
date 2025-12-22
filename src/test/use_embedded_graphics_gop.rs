@@ -20,7 +20,7 @@ pub fn use_embedded_graphics_gop() {
     // Create the draw target utilizing the configured protocol.
     let mut target = BltDrawTarget::new(&mut protocol).unwrap();
     // Make it double-buffered
-    target.double_buffer(true).unwrap();
+    target.double_buffer(false).unwrap();
 
     // ...draw on it...
     Text::new("ｱｲｳｴｵ, ASCII_JP
@@ -42,6 +42,7 @@ pub fn use_embedded_graphics_gop() {
     Text::new("何意味", Point::new(5,30),
               U8g2TextStyle::new(u8g2_font_boutique_bitmap_7x7_t_chinese3, Rgb888::WHITE)
     ).draw(&mut target).unwrap();
+
 
     // Transfer changes to the framebuffer
     target.commit().unwrap();

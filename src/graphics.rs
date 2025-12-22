@@ -1,4 +1,3 @@
-use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_prefetch, _mm_stream_si128, _MM_HINT_T0};
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtocol};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use crate::error::Result;
@@ -13,9 +12,11 @@ pub struct Screen {
 impl Screen {
     pub fn new() -> Result<Self> {
         let handle = get_handle_for_protocol::<GraphicsOutput>()?;
-        let gop = open_protocol_exclusive::<GraphicsOutput>(handle)?;
+        let mut gop = open_protocol_exclusive::<GraphicsOutput>(handle)?;
         Ok(Self { gop, stdout: 0 })
     }
+
+    pub fn get_gop(&mut self) -> &mut ScopedProtocol<GraphicsOutput> { &mut self.gop }
 
     pub fn draw_image(&mut self, width: u32, height: u32, pixels: &[BltPixel]) -> Result {
         // 我不知道为什么封装成这样了，但是它能工作！
@@ -42,8 +43,8 @@ impl Screen {
         })?)
     }
 
-    // 临时用来调试的 功能补全 不要用
-    pub fn draw_string(&mut self, text: &str) {
+    // 手搓的残疾 ASCII 输出
+    pub fn draw_str(&mut self, text: &str) {
         let mut x = 0;
         let y = 0;
         // 报错信息建议使用醒目的颜色：比如红底白字或黑底红字
@@ -79,8 +80,6 @@ impl Screen {
 
             // 5. 字符绘制完后，光标右移 8 像素
             x += 8;
-
-            // 进阶提示：你可以在这里加一个检查，如果 x 超过屏幕宽度就自动换行
         }
 
         self.stdout += 18;
