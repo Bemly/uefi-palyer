@@ -6,25 +6,26 @@ use crate::fs::Fs;
 use crate::graphics::Screen;
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
+use crate::error::Result;
 
 pub mod buffer;
 pub mod decoder;
 pub mod ascii_font;
 
 
-pub fn video_run(screen: &mut Screen) -> crate::error::Result {
+pub fn video_run(screen: &mut Screen) -> Result {
 
     // 关闭看门狗，如果不行之后写定时喂狗
     set_watchdog_timer(0, 0, None)?;
 
-    // const WIDTH: usize = 1920;
-    // const HEIGHT: usize = 1080;
-    const WIDTH: usize = 1280;
-    const HEIGHT: usize = 720;
+    const WIDTH: usize = 1920;
+    const HEIGHT: usize = 1080;
+    // const WIDTH: usize = 1280;
+    // const HEIGHT: usize = 720;
     const SIZE: usize = WIDTH * HEIGHT;
 
     let mut fs = Fs::new()?;
-    let mut file = fs.open_file(cstr16!("anime\\video.qois"))?;
+    let mut file = fs.open_file(cstr16!("1080p\\video.qois"))?;
     // let mut qoi = QoiFrameBuffer::new(SIZE);
     // let mut raw = RawFrameBuffer::new(SIZE);
     // let mut blt = BltFrameBuffer::new(SIZE);
