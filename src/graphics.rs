@@ -102,4 +102,51 @@ impl Screen {
             video.rewind();
         }
     }
+
+
+    /// 高性能显存直接写入
+    pub fn draw_fast_direct_copy(
+        &mut self,
+        video: &mut VideoMemoryRaw,
+        width: usize,
+        height: usize
+    ) {
+        // 1. 获取下一帧
+        let pixel_slice = match video.next_frame() {
+            Some(slice) => slice,
+            None => {
+                video.rewind();
+                return;
+            }
+        };
+
+        // 2. 先提取 ModeInfo（此时 gop 会被借用，但在这一行结束后就会释放）
+        let mode_info = self.gop.current_mode_info();
+        let stride = mode_info.stride();
+
+        // 3. 再获取 FrameBuffer（此时 gop 被独占借用）
+        let mut fb = self.gop.frame_buffer();
+        let dest_ptr = fb.as_mut_ptr();
+
+        // 4. 执行内存拷贝
+        unsafe {
+            if stride == width {
+                // 全局一次性拷贝
+                core::ptr::copy_nonoverlapping(
+                    pixel_slice.as_ptr() as *const u8,
+                    dest_ptr,
+                    width * height * 4
+                );
+            } else {
+                // 考虑 Stride 的逐行拷贝
+                //
+                let src_ptr = pixel_slice.as_ptr() as *const u8;
+                for y in 0..height {
+                    let row_src = src_ptr.add(y * width * 4);
+                    let row_dest = dest_ptr.add(y * stride * 4);
+                    core::ptr::copy_nonoverlapping(row_src, row_dest, width * 4);
+                }
+            }
+        }
+    }
 }

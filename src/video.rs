@@ -25,16 +25,17 @@ pub fn video_run(screen: &mut Screen) -> crate::error::Result {
 
     let mut fs = Fs::new()?;
     let mut file = fs.open_file(cstr16!("anime\\video.qois"))?;
-    let mut qoi = QoiFrameBuffer::new(SIZE);
-    let mut raw = RawFrameBuffer::new(SIZE);
-    let mut blt = BltFrameBuffer::new(SIZE);
+    // let mut qoi = QoiFrameBuffer::new(SIZE);
+    // let mut raw = RawFrameBuffer::new(SIZE);
+    // let mut blt = BltFrameBuffer::new(SIZE);
     // let mut video = VideoMemory::new(file)?;
     let mut video_raw = VideoMemoryRaw::new(file)?;
     loop {
         // draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
         // draw_all_mem(&mut video, screen, &mut qoi, &mut raw, &mut blt)?;
-        // draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?; // UNSAFE!!
-        screen.draw_all_mem_raw_zero_copy(&mut video_raw, WIDTH, HEIGHT);// UNSAFE!!
+        // draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;  // UNSAFE!!
+        // screen.draw_all_mem_raw_zero_copy(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
+        screen.draw_fast_direct_copy(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
         // boot::stall(Duration::from_millis(1000 / 90));
     }
 
