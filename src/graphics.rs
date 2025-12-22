@@ -1,3 +1,4 @@
+use core::arch::x86_64::{__m128i, _mm_loadu_si128, _mm_prefetch, _mm_stream_si128, _MM_HINT_T0};
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtocol};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use crate::error::Result;
@@ -139,7 +140,6 @@ impl Screen {
                 );
             } else {
                 // 考虑 Stride 的逐行拷贝
-                //
                 let src_ptr = pixel_slice.as_ptr() as *const u8;
                 for y in 0..height {
                     let row_src = src_ptr.add(y * width * 4);
@@ -149,4 +149,96 @@ impl Screen {
             }
         }
     }
+
+
+    #[inline]
+    pub fn draw_u64_optimized(
+        &mut self,
+        video: &mut VideoMemoryRaw,
+        width: usize,
+        height: usize,
+        stride: usize,
+        is_continuous: bool,
+        dest_ptr: *mut u8
+    ) {
+        let pixel_slice = match video.next_frame() {
+            Some(slice) => slice,
+            None => { video.rewind(); return; }
+        };
+
+        let src_ptr = pixel_slice.as_ptr() as *const u8;
+
+        unsafe {
+            if is_continuous {
+                // 全屏连续拷贝
+                let total_bytes = width * height * 4;
+                self.u64_fast_copy(src_ptr, dest_ptr, total_bytes);
+            } else {
+                // 按行拷贝（处理 Stride）
+                let row_bytes = width * 4;
+                let stride_bytes = stride * 4;
+                for y in 0..height {
+                    let row_src = src_ptr.add(y * row_bytes);
+                    let row_dest = dest_ptr.add(y * stride_bytes);
+                    self.u64_fast_copy(row_src, row_dest, row_bytes);
+                }
+            }
+        }
+    }
+
+    #[inline(always)]
+    unsafe fn u64_fast_copy(&self, src: *const u8, dst: *mut u8, len: usize) {
+        let mut i = 0;
+
+        // 1. 核心循环：展开 8 倍 (每次处理 64 字节)
+        // 使用 u64 (8字节) * 8 = 64字节，正好匹配一个 Cache Line
+        while i + 64 <= len {
+            // 使用 read_unaligned 防止 src 不对齐，write_volatile 确保写入显存不经过缓存
+            let s0 = (src.add(i) as *const u64).read_unaligned();
+            let s1 = (src.add(i + 8) as *const u64).read_unaligned();
+            let s2 = (src.add(i + 16) as *const u64).read_unaligned();
+            let s3 = (src.add(i + 24) as *const u64).read_unaligned();
+            let s4 = (src.add(i + 32) as *const u64).read_unaligned();
+            let s5 = (src.add(i + 40) as *const u64).read_unaligned();
+            let s6 = (src.add(i + 48) as *const u64).read_unaligned();
+            let s7 = (src.add(i + 56) as *const u64).read_unaligned();
+
+            (dst.add(i) as *mut u64).write_volatile(s0);
+            (dst.add(i + 8) as *mut u64).write_volatile(s1);
+            (dst.add(i + 16) as *mut u64).write_volatile(s2);
+            (dst.add(i + 24) as *mut u64).write_volatile(s3);
+            (dst.add(i + 32) as *mut u64).write_volatile(s4);
+            (dst.add(i + 40) as *mut u64).write_volatile(s5);
+            (dst.add(i + 48) as *mut u64).write_volatile(s6);
+            (dst.add(i + 56) as *mut u64).write_volatile(s7);
+
+            i += 64;
+        }
+
+        // 2. 补漏循环：每次 8 字节
+        while i + 8 <= len {
+            let val = (src.add(i) as *const u64).read_unaligned();
+            (dst.add(i) as *mut u64).write_volatile(val);
+            i += 8;
+        }
+
+        // 3. 尾部处理：处理不足 8 字节的散碎字节
+        while i < len {
+            dst.add(i).write_volatile(src.add(i).read());
+            i += 1;
+        }
+    }
+
+    pub fn draw_u64_optimized_loop(&mut self, video: &mut VideoMemoryRaw, width: usize, height: usize) {
+        let mode_info = self.gop.current_mode_info();
+        let stride = mode_info.stride();
+        let mut fb = self.gop.frame_buffer();
+        let is_continuous = stride == width;
+        let dest_ptr = fb.as_mut_ptr();
+
+        loop {
+            self.draw_u64_optimized(video, width, height, stride, is_continuous, dest_ptr);
+        }
+    }
 }
+

@@ -9,6 +9,8 @@ use log::{error, info, warn};
 use uefi::proto::console::gop::{BltOp, BltPixel, GraphicsOutput};
 
 
+// 注意必须要2个核心!
+
 // 1. 定义在 AP (应用处理器) 上执行的并行任务
 // 必须使用 extern "efiapi" 以符合 UEFI 调用约定
 extern "efiapi" fn ap_count_task(arg: *mut c_void) {
@@ -33,7 +35,8 @@ extern "efiapi" fn ap_count_task(arg: *mut c_void) {
 }
 
 pub fn mp_service() -> Status {
-    uefi::helpers::init().expect("Failed to init UEFI");
+    // 如果没有注册控制台需要加上
+    // uefi::helpers::init().expect("Failed to init UEFI");
 
     // let mut screen = Screen::new().expect("Failed to create screen");
     // video_run(&mut screen).unwrap_or_else(|e| handle_fatal(e, &mut screen));

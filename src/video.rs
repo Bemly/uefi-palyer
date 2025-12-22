@@ -31,19 +31,21 @@ pub fn video_run(screen: &mut Screen) -> Result {
     // let mut blt = BltFrameBuffer::new(SIZE);
     // let mut video = VideoMemory::new(file)?;
     let mut video_raw = VideoMemoryRaw::new(file)?;
+    screen.draw_u64_optimized_loop(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
+
     loop {
         // draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
         // draw_all_mem(&mut video, screen, &mut qoi, &mut raw, &mut blt)?;
         // draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;  // UNSAFE!!
         // screen.draw_all_mem_raw_zero_copy(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
-        screen.draw_fast_direct_copy(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
+        // screen.draw_fast_direct_copy(&mut video_raw, WIDTH, HEIGHT);      // UNSAFE!!
         // boot::stall(Duration::from_millis(1000 / 90));
     }
 
     // Ok(())
 }
 
-fn draw_once(fs: &mut Fs, screen: &mut Screen, path: &CStr16, blt_buf: &mut [BltPixel]) -> crate::error::Result {
+fn draw_once(fs: &mut Fs, screen: &mut Screen, path: &CStr16, blt_buf: &mut [BltPixel]) -> Result {
     // 加载文件
     let qoi_data = fs.read_file(path)?;
 
@@ -69,7 +71,7 @@ fn draw_all_mem(
     qoi: &mut QoiFrameBuffer,
     raw: &mut RawFrameBuffer,
     blt: &mut BltFrameBuffer
-) -> crate::error::Result {
+) -> Result {
     if video.next_frame(&mut qoi.0) {
         raw.header = loop {
             match qoi::decode_to_buf(&mut raw.pixels, &qoi.0) {
@@ -111,7 +113,7 @@ fn draw_all_mem_zero_copy(
     screen: &mut Screen,
     qoi: &mut QoiFrameBuffer,
     blt: &mut BltFrameBuffer
-) -> crate::error::Result {
+) -> Result {
     if video.next_frame(&mut qoi.0) {
         // TODO:严重错误 真机上会出现数据错位的情况,概率极大
         let Ok(header) = qoi::decode_header(&qoi.0) else { return Ok(()) };
@@ -153,7 +155,7 @@ fn draw(
     qoi: &mut QoiFrameBuffer,
     raw: &mut RawFrameBuffer,
     blt: &mut BltFrameBuffer
-) -> crate::error::Result {
+) -> Result {
     // 读文件流
     if fs.read_frame_next(file, &mut qoi.0)? {
         // 解码
