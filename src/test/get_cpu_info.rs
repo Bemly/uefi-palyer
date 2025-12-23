@@ -1,3 +1,4 @@
+use raw_cpuid::CpuId;
 use uefi::boot::{locate_handle_buffer, open_protocol_exclusive, SearchType};
 use uefi::{println, Identify};
 use uefi::prelude::*;
@@ -70,5 +71,10 @@ fn mp_protocol() {
     }
 
     get_cpu_info_by_smbios();
+    get_cpu_info_by_cpuid();
+}
+
+fn get_cpu_info_by_cpuid() {
+    println!("{:#?}", CpuId::new())
 }
 
