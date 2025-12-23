@@ -6,11 +6,17 @@ use uefi::proto::pi::mp::MpServices;
 pub fn get_cpu_info() {
     // 如果没有注册控制台需要加上
     // uefi::helpers::init().expect("Failed to init UEFI");
+    mp_protocol();
+
+}
+
+fn mp_protocol() {
+
 
     // 2. 在定位器中寻找 MpServices 协议
     let mp_services_handle =
         locate_handle_buffer(SearchType::ByProtocol(&MpServices::GUID))
-        .expect("No MP Services protocol supporting multiple processors found.");
+            .expect("No MP Services protocol supporting multiple processors found.");
 
     if mp_services_handle.len() > 1 {
         log::warn!("Multiple MP Services instances were detected, which may involve multiple CPUs or a complex topology!");
@@ -18,7 +24,7 @@ pub fn get_cpu_info() {
 
     let mut mp_services =
         open_protocol_exclusive::<MpServices>(mp_services_handle.first().unwrap().clone())
-        .expect("Unable to open MpServices protocol");
+            .expect("Unable to open MpServices protocol");
 
     // BSP 喊话
     let my_index = mp_services.who_am_i().expect("Unable to obtain my processor index");
@@ -67,5 +73,5 @@ pub fn get_cpu_info() {
             loc.thread
         ); // 物理位置: 插槽={}, 内核={}, 线程={}
     }
-
 }
+

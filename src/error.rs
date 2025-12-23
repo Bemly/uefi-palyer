@@ -34,10 +34,10 @@ impl From<qoi::Error> for NyaStatus {
 pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
     let _ = screen.clear();
 
+    // 可变参数宏简化
     macro_rules! println {
         ($($arg:tt)*) => { screen.draw_str(&alloc::format!($($arg)*)) }
     }
-
 
     println!("KERNEL PANIC!");
 

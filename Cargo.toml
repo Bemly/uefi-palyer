@@ -1,6 +1,6 @@
 [package]
 name = "myuefi"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -17,6 +17,7 @@ uefi = { version = "0.36.1", features = ["logger","alloc","global_allocator","pa
 log = "0.4.29"
 # 信息读取类
 raw-cpuid = "11.6.0"
+dmidecode = { version = "1.0.0", default-features = false }
 
 
 [profile.release]
