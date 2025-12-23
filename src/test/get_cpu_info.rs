@@ -1,7 +1,8 @@
 use uefi::boot::{locate_handle_buffer, open_protocol_exclusive, SearchType};
-use uefi::Identify;
+use uefi::{println, Identify};
 use uefi::prelude::*;
 use uefi::proto::pi::mp::MpServices;
+use crate::test::get_smbios::get_cpu_info_by_smbios;
 
 pub fn get_cpu_info() {
     // 如果没有注册控制台需要加上
@@ -54,24 +55,20 @@ fn mp_protocol() {
             .get_processor_info(i)
             .expect("Unable to obtain processor information");
 
+        println!("Processor Index: {}, uuid:{}, enabled: {}, healthy: {}, bsp: {}",
+                 i, info.processor_id, info.is_enabled(), info.is_healthy(), info.is_bsp());
 
-        // 5. 打印信息
-        log::info!("------------------------------------------");
-        log::info!("Processor Index: {}", i); // 处理器索引
-        log::info!("uuid: {:#x}", info.processor_id); // 唯一标识 (ID)
-        log::info!("is_enabled: {:?}", info.is_enabled());
-        log::info!("is_healthy: {:?}", info.is_healthy());
-        log::info!("is_bsp: {:?}", info.is_bsp());
 
         // 提取物理位置 (CpuPhysicalLocation)
         let loc = info.location;
-        log::info!("location: {:?}", loc);
-        log::info!(
+        println!(
             "Physical location: Slot={}, Kernel={}, Thread={}",
             loc.package,
             loc.core,
             loc.thread
         ); // 物理位置: 插槽={}, 内核={}, 线程={}
     }
+
+    get_cpu_info_by_smbios();
 }
 
