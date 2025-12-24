@@ -75,6 +75,12 @@ fn mp_protocol() {
 }
 
 fn get_cpu_info_by_cpuid() {
-    println!("{:#?}", CpuId::new())
+    // 主要是指令集
+    let cpuid = CpuId::new();
+    println!("cpuid_Vendor{:?}", cpuid.get_vendor_info());
+    println!("cpuid_Feature{:?}", cpuid.get_feature_info());
+    println!("cpuid_Extended_Feature{:?}", cpuid.get_extended_feature_info());
+    println!("cpuid_Extended_State{:?}", cpuid.get_extended_state_info());
+    println!("cpuid_Brand{:?}", cpuid.get_processor_brand_string())
 }
 

@@ -43,45 +43,56 @@ impl Screen {
         })?)
     }
 
-    // 手搓的残疾 ASCII 输出
+    // 糟糕的 ASCII 输出实现,一个字符的一个笔画开始渲染
     pub fn draw_str(&mut self, text: &str) {
         let mut x = 0;
-        let y = 0;
-        // 报错信息建议使用醒目的颜色：比如红底白字或黑底红字
-        let fg = BltPixel::new(255, 255, 255); // 白色前景
-        let bg = BltPixel::new(0, 0, 0);       // 黑色背景
+        // 获取当前屏幕的宽度，用于自动换行
+        let (width, _) = self.gop.current_mode_info().resolution();
+
+        let fg = BltPixel::new(255, 255, 255);
+        let bg = BltPixel::new(0, 0, 0);
 
         for c in text.chars() {
-            // 1. 获取 ASCII 码索引 (0-127)
-            let index = (c as usize) & 0x7F;
+            // --- 1. 处理换行逻辑 ---
 
-            // 2. 直接获取该字符的点阵行数据
-            // glyph 的类型是 &[u8; 16]
+            // 显式换行符处理
+            if c == '\n' {
+                x = 0;
+                self.stdout += 16; // 换行高度（点阵16像素 + 2像素间距）
+                continue;
+            }
+
+            // 超出屏幕宽度自动换行 (8 是字符宽度)
+            if x + 8 > width {
+                x = 0;
+                self.stdout += 16;
+            }
+
+            // --- 2. 绘制字符 ---
+
+            let index = (c as usize) & 0x7F;
             let glyph = &FONT_8X16[index];
 
             for row in 0..16 {
-                // 获取这一行的 8 位像素数据
                 let row_bits = glyph[row];
-
                 for col in 0..8 {
-                    // 3. 检查位。注意：最高位 (bit 7) 对应最左边的像素
-                    // 使用 (row_bits >> (7 - col)) & 1 来提取
                     let is_fg = (row_bits >> (7 - col)) & 1 == 1;
                     let color = if is_fg { fg } else { bg };
 
-                    // 4. 绘制像素
+                    // 绘制像素
                     let _ = self.gop.blt(BltOp::VideoFill {
                         color,
-                        dest: (x + col, y + row + self.stdout),
+                        dest: (x + col, self.stdout + row),
                         dims: (1, 1),
                     });
                 }
             }
 
-            // 5. 字符绘制完后，光标右移 8 像素
+            // 字符绘制完后，坐标右移
             x += 8;
         }
 
+        // 整个字符串画完后，最后额外换一行，防止下一次打印重叠
         self.stdout += 18;
     }
 

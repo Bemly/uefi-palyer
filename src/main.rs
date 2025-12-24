@@ -15,7 +15,7 @@ use crate::error::handle_fatal;
 use crate::graphics::Screen;
 use crate::video::video_run;
 
-use crate::test::get_cpu_info::get_cpu_info;
+use crate::test::get_multi_monitor::get_multi_monitor;
 
 #[entry]
 fn main() -> Status {
@@ -24,7 +24,7 @@ fn main() -> Status {
 
     // let mut screen = Screen::new().expect("Failed to create screen");
     // video_run(&mut screen).unwrap_or_else(|e| handle_fatal(e, screen));
-    get_cpu_info();
+    get_multi_monitor();
 
     boot::stall(Duration::from_mins(2));
     Status::SUCCESS

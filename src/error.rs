@@ -53,6 +53,7 @@ pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
     panic!("Unrecoverable error occurred.");
 }
 
+// TODO: 高耦合,之后分离
 #[allow(unused)] // 宏的大手
 pub fn _handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
     use embedded_graphics::{
