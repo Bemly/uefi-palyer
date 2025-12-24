@@ -2,6 +2,7 @@ use alloc::boxed::Box;
 use alloc::{format, vec};
 use alloc::vec::Vec;
 use core::ffi::c_void;
+use core::sync::atomic::{AtomicUsize, Ordering};
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, set_watchdog_timer, EventType, Tpl};
 use uefi::{cstr16, println, CStr16, Status};
 use uefi::proto::console::gop::{BltPixel, GraphicsOutput};
@@ -214,42 +215,53 @@ struct PlayTask<'a> {
     // 注意：这里需要是指针的指针，因为 AP 无法直接访问 Vec 的元数据
     core_frame_ptrs: *const *const *const u8,
     total_frames: usize,
+    sync_counter: &'a AtomicUsize, // 关键：原子计数器
 }
 
 extern "efiapi" fn play_task(arg: *mut c_void) {
     if arg.is_null() { return; }
     let ctx = unsafe { &*(arg as *const PlayTask) };
-    let mp = unsafe { &*ctx.mp };
 
-    // 1. 现场确认身份
-    let my_id = mp.who_am_i().unwrap_or(0);
+    let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(0) };
     if my_id >= ctx.num_cores { return; }
 
-    // 2. 计算属于自己的显存位置
+    // 核心参数计算
     let rows_per_core = ctx.height / ctx.num_cores;
     let y_start = my_id * rows_per_core;
     let my_fb_ptr = unsafe { ctx.fb_base.add(y_start * ctx.stride_bytes) };
-
-    // 3. 计算属于自己的数据包位置
-    // ctx.core_frame_ptrs[my_id] 指向该核心的帧地址列表
     let my_frames_list = unsafe { *ctx.core_frame_ptrs.add(my_id) };
-
-    let mut frame_idx = 0;
     let my_block_size = if my_id == ctx.num_cores - 1 {
         (ctx.height - y_start) * ctx.stride_bytes
     } else {
         rows_per_core * ctx.stride_bytes
     };
 
+    // 使用我们传入的原子计数器来控制进度
+    // 我们定义：frame_idx = sync_counter / num_cores
     loop {
+        // 1. 获取当前大家共有的帧索引
+        // 这里不能直接 fetch_add，因为每个核都要用同一个值写完这一轮
+        let current_count = ctx.sync_counter.load(Ordering::Acquire);
+        let frame_idx = (current_count / ctx.num_cores) % ctx.total_frames;
+
+        // 2. 搬运属于自己的那一块数据
         unsafe {
             let src_ptr = *my_frames_list.add(frame_idx);
             core::ptr::copy_nonoverlapping(src_ptr, my_fb_ptr, my_block_size);
         }
 
-        frame_idx = (frame_idx + 1) % ctx.total_frames;
-        // 如果播放太快，可以在这里加个计数器延迟
-        // core::hint::spin_loop();
+        // 3. 同步：完成任务，打卡签到
+        // 每个核完成一帧的局部拷贝后，给原子变量 +1
+        ctx.sync_counter.fetch_add(1, Ordering::SeqCst);
+
+        // 4. 等待其他核心。只有当所有核心都写完了这一帧，
+        // sync_counter 才会达到 (frame_idx + 1) * num_cores
+        let target = (current_count / ctx.num_cores + 1) * ctx.num_cores;
+        while ctx.sync_counter.load(Ordering::Acquire) < target {
+            core::hint::spin_loop(); // 自旋等待“慢队友”
+        }
+
+        // 此时，大家一起跳出循环，进入下一轮 loop，重新计算新的 frame_idx
     }
 }
 
@@ -363,6 +375,8 @@ pub fn mp_draw(screen: &mut Screen, file: &mut RegularFile, width: usize, height
     let scr_stride = screen.get_gop().current_mode_info().stride();
     let fb_base = screen.get_gop().frame_buffer().as_mut_ptr();
 
+    let sync_counter = Box::leak(Box::new(AtomicUsize::new(0)));
+
     // --- 构造统一 Context ---
     let ctx = Box::leak(Box::new(PlayTask {
         mp: &mp,
@@ -373,6 +387,7 @@ pub fn mp_draw(screen: &mut Screen, file: &mut RegularFile, width: usize, height
         num_cores: n_cores,
         core_frame_ptrs,
         total_frames: core_frames[0].len(),
+        sync_counter
     }));
 
     let arg_ptr = ctx as *mut _ as *mut c_void;
