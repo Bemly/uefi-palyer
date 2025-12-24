@@ -68,6 +68,8 @@ fn println(gop: &mut ScopedProtocol<GraphicsOutput>, text: &str) {
     unsafe { OFFSET += 18 }
 }
 
+// 经过测试发现大部分GOP驱动都只支持给我一个Handle(也就是一个显示器)
+// 那多显示器已经毫无意义，已经回滚到单显示器
 pub fn get_multi_mode() {
     let gop = get_handle_for_protocol::<GraphicsOutput>().unwrap();
     let mut gop = open_protocol_exclusive::<GraphicsOutput>(gop).unwrap();
@@ -88,7 +90,7 @@ pub fn get_multi_mode() {
 }
 
 // 很遗憾 启动的时候默认只启动一个屏幕
-pub fn get_multi_monitor_lazy() {
+pub fn get_multi_monitor() {
     let handle = find_handles::<GraphicsOutput>().expect("Failed to find handles");
 
     // 可以用ok().map() 但是可读性不是很好
@@ -118,13 +120,19 @@ pub fn get_multi_monitor_lazy() {
             }
         }
     }
+    // for h in handle {
+    //     let mut gop = open_protocol_exclusive::<GraphicsOutput>(h).expect("Failed to open protocol");
+    //
+    //     let mode_strings: Vec<String> = gop.modes()
+    //         .map(|mode| info2str("query mode", *mode.info()))
+    //         .collect();
+    //     for s in mode_strings {
+    //         println(&mut gop, &s);
+    //     }
+    // }
 }
 
-pub fn get_multi_monitor() {
-
-}
-
-pub fn test_reopen_protocol() {
+pub fn test_reopen_protocol() { // it work! : )
     {
         let gop = get_handle_for_protocol::<GraphicsOutput>().unwrap();
         let gop = open_protocol_exclusive::<GraphicsOutput>(gop).unwrap();
@@ -144,7 +152,7 @@ pub fn test_reopen_protocol() {
     }
 }
 
-pub fn test_reopen_multi_protocol() {
+pub fn test_reopen_multi_protocol() { // it dont work :(
     {
         let handle = find_handles::<GraphicsOutput>().unwrap();
         for h in handle {
