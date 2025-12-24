@@ -9,130 +9,120 @@ use log::{error, info, warn};
 use uefi::proto::console::gop::{GraphicsOutput, PixelFormat, BltPixel};
 
 #[repr(C)]
-struct DrawContext {
+struct MpDrawContext<'a> {
+    mp: &'a MpServices,
     fb_base: *mut u8,
     width: usize,
     height: usize,
     stride: usize,
-    num_cores: usize,
-    mp: *const MpServices,
-    frame_data: *const BltPixel, // 视频帧数据基地址
+    num_total_procs: usize,
 }
 
 #[inline(always)]
-unsafe fn u64_fast_copy(src: *const u8, dst: *mut u8, len: usize) {
+unsafe fn u64_fast_copy_color(dst: *mut u8, len: usize, color_u64: u64) {
     let mut i = 0;
+    // 每次填充 64 字节 (8个 u64)
     while i + 64 <= len {
-        let s0 = (src.add(i) as *const u64).read_unaligned();
-        let s1 = (src.add(i + 8) as *const u64).read_unaligned();
-        let s2 = (src.add(i + 16) as *const u64).read_unaligned();
-        let s3 = (src.add(i + 24) as *const u64).read_unaligned();
-        let s4 = (src.add(i + 32) as *const u64).read_unaligned();
-        let s5 = (src.add(i + 40) as *const u64).read_unaligned();
-        let s6 = (src.add(i + 48) as *const u64).read_unaligned();
-        let s7 = (src.add(i + 56) as *const u64).read_unaligned();
-
-        (dst.add(i) as *mut u64).write_volatile(s0);
-        (dst.add(i + 8) as *mut u64).write_volatile(s1);
-        (dst.add(i + 16) as *mut u64).write_volatile(s2);
-        (dst.add(i + 24) as *mut u64).write_volatile(s3);
-        (dst.add(i + 32) as *mut u64).write_volatile(s4);
-        (dst.add(i + 40) as *mut u64).write_volatile(s5);
-        (dst.add(i + 48) as *mut u64).write_volatile(s6);
-        (dst.add(i + 56) as *mut u64).write_volatile(s7);
+        let ptr = dst.add(i) as *mut u64;
+        ptr.write_volatile(color_u64);
+        ptr.add(1).write_volatile(color_u64);
+        ptr.add(2).write_volatile(color_u64);
+        ptr.add(3).write_volatile(color_u64);
+        ptr.add(4).write_volatile(color_u64);
+        ptr.add(5).write_volatile(color_u64);
+        ptr.add(6).write_volatile(color_u64);
+        ptr.add(7).write_volatile(color_u64);
         i += 64;
     }
     while i + 8 <= len {
-        let val = (src.add(i) as *const u64).read_unaligned();
-        (dst.add(i) as *mut u64).write_volatile(val);
+        (dst.add(i) as *mut u64).write_volatile(color_u64);
         i += 8;
     }
     while i < len {
-        dst.add(i).write_volatile(src.add(i).read());
+        dst.add(i).write_volatile(color_u64 as u8);
         i += 1;
     }
 }
 
 extern "efiapi" fn ap_draw_task(arg: *mut c_void) {
     if arg.is_null() { return; }
-    let ctx = unsafe { &*(arg as *const DrawContext) };
-    let mp = unsafe { &*ctx.mp };
+    let ctx = unsafe { &*(arg as *const MpDrawContext) };
 
-    let proc_num = mp.who_am_i().unwrap_or(0);
-    
-    // 计算分块区域 (横向切分)
-    let block_height = ctx.height / ctx.num_cores;
-    let start_y = proc_num * block_height;
-    let end_y = if proc_num == ctx.num_cores - 1 {
+    // 获取当前核心索引
+    let proc_num = ctx.mp.who_am_i().unwrap_or(0);
+
+    // --- 核心逻辑：划分连续区域 ---
+    // 每个核心负责的行数 = 总行数 / 总核心数
+    let rows_per_core = ctx.height / ctx.num_total_procs;
+    let start_row = proc_num * rows_per_core;
+
+    // 最后一个核心负责处理剩余的所有行（防止除不尽）
+    let end_row = if proc_num == ctx.num_total_procs - 1 {
         ctx.height
     } else {
-        (proc_num + 1) * block_height
+        start_row + rows_per_core
     };
 
-    let row_bytes = ctx.width * 4;
-    let stride_bytes = ctx.stride * 4;
-    let src_base = ctx.frame_data as *const u8;
+    // 每个核心使用不同的颜色（示例：基于 proc_num 生成简单的颜色）
+    // 0x00RRGGBB (UEFI 通常是 BGR0 或 RGB0)
+    let color: u32 = match proc_num % 4 {
+        0 => 0x00FF0000, // 红色
+        1 => 0x0000FF00, // 绿色
+        2 => 0x000000FF, // 蓝色
+        _ => 0x00FFFF00, // 黄色
+    };
+    // 构造 64 位的颜色块以便 fast_copy
+    let color_u64 = ((color as u64) << 32) | (color as u64);
 
-    loop {
-        for y in start_y..end_y {
-            unsafe {
-                let row_src = src_base.add(y * row_bytes);
-                let row_dest = ctx.fb_base.add(y * stride_bytes);
-                u64_fast_copy(row_src, row_dest, row_bytes);
-            }
+    // 计算该核心负责的显存起始位置
+    let bytes_per_pixel = 4;
+    let row_size_in_bytes = ctx.stride * bytes_per_pixel;
+
+    for y in start_row..end_row {
+        unsafe {
+            let row_ptr = ctx.fb_base.add(y * row_size_in_bytes);
+            // 只填充这一行中可见的宽度部分
+            u64_fast_copy_color(row_ptr, ctx.width * bytes_per_pixel, color_u64);
         }
     }
 }
 
 pub fn multi_core_draw() {
     info!("=== Starting Multi-Processor (MP) Video Copy Test ===");
-    
+
     // 1. 获取 MP 服务
     let mp_handle = get_handle_for_protocol::<MpServices>().unwrap();
     let mp = open_protocol_exclusive::<MpServices>(mp_handle).unwrap();
-    let num_proc = mp.get_number_of_processors().unwrap();
 
     // 2. 获取 GOP 服务
     let gop_handle = get_handle_for_protocol::<GraphicsOutput>().unwrap();
     let mut gop = open_protocol_exclusive::<GraphicsOutput>(gop_handle).unwrap();
-    
+
     let mode_info = gop.current_mode_info();
     let (width, height) = mode_info.resolution();
     let stride = mode_info.stride();
     let mut fb = gop.frame_buffer();
     let fb_base = fb.as_mut_ptr();
 
-    // 3. 加载视频数据 (这里假设你要测试读取内存输出，需要提供一个数据源)
-    // 如果没有真实视频数据，我们这里分配一个临时内存模拟
-    let pixel_count = width * height;
-    let mut fake_video_frame = alloc::vec![BltPixel::new(0, 0, 0); pixel_count];
-    
-    // 为测试填充点颜色
-    for (i, p) in fake_video_frame.iter_mut().enumerate() {
-        let x = i % width;
-        let y = i / width;
-        p.red = (x % 256) as u8;
-        p.green = (y % 256) as u8;
-        p.blue = ((x + y) % 256) as u8;
-    }
+    let num_proc = mp.get_number_of_processors().unwrap();
+    let total_cores = num_proc.enabled;
 
-    let ctx = DrawContext {
+    let ctx = MpDrawContext {
+        mp: &mp,
         fb_base,
         width,
         height,
         stride,
-        num_cores: num_proc.enabled,
-        mp: &*mp as *const MpServices,
-        frame_data: fake_video_frame.as_ptr(),
+        num_total_procs: total_cores,
     };
 
     let arg_ptr = &ctx as *const _ as *mut c_void;
 
-    info!("Dispatching video copy task to all APs...");
-    
-    if num_proc.enabled > 1 {
+    if total_cores > 1 {
+        // 启动除 BSP 以外的所有 AP
+        // uefi-rs 的 startup_all_aps 在这里会阻塞直到 AP 运行结束
         if let Err(e) = mp.startup_all_aps(
-            false, 
+            false,
             ap_draw_task,
             arg_ptr,
             None,
@@ -142,8 +132,10 @@ pub fn multi_core_draw() {
         }
     }
 
-    // BSP 也参与
+    // BSP 亲自处理它自己的那一份区域
     ap_draw_task(arg_ptr);
+
+    info!("All cores finished drawing.");
 }
 
 
