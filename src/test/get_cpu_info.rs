@@ -1,5 +1,6 @@
+use log::{error, info};
 use raw_cpuid::CpuId;
-use uefi::boot::{locate_handle_buffer, open_protocol_exclusive, SearchType};
+use uefi::boot::{get_handle_for_protocol, locate_handle_buffer, open_protocol_exclusive, SearchType};
 use uefi::{println, Identify};
 use uefi::prelude::*;
 use uefi::proto::pi::mp::MpServices;
@@ -8,11 +9,12 @@ use crate::test::get_smbios::get_cpu_info_by_smbios;
 pub fn get_cpu_info() {
     // 如果没有注册控制台需要加上
     // uefi::helpers::init().expect("Failed to init UEFI");
-    mp_protocol();
-
+    get_cpu_info_by_mp_proto();
+    get_cpu_info_by_smbios();
+    get_cpu_info_by_cpuid();
 }
 
-fn mp_protocol() {
+fn get_cpu_info_by_mp_proto() {
 
 
     // 2. 在定位器中寻找 MpServices 协议
@@ -47,8 +49,8 @@ fn mp_protocol() {
         .get_number_of_processors()
         .expect("Unable to obtain the number of processors"); // 无法获取处理器数量
 
-    log::info!("Total number of logic processors: {}", counts.total); // 总逻辑处理器数
-    log::info!("Number of currently enabled processors: {}", counts.enabled); //当前启用的处理器数
+    println!("Total number of logic processors: {}", counts.total); // 总逻辑处理器数
+    println!("Number of currently enabled processors: {}", counts.enabled); //当前启用的处理器数
 
     // 4. 遍历并获取每个处理器的详细信息 (ProcessorInformation)
     for i in 0..counts.total {
@@ -69,18 +71,18 @@ fn mp_protocol() {
             loc.thread
         ); // 物理位置: 插槽={}, 内核={}, 线程={}
     }
-
-    get_cpu_info_by_smbios();
-    get_cpu_info_by_cpuid();
 }
 
 fn get_cpu_info_by_cpuid() {
     // 主要是指令集
     let cpuid = CpuId::new();
-    println!("cpuid_Vendor{:?}", cpuid.get_vendor_info());
-    println!("cpuid_Feature{:?}", cpuid.get_feature_info());
-    println!("cpuid_Extended_Feature{:?}", cpuid.get_extended_feature_info());
-    println!("cpuid_Extended_State{:?}", cpuid.get_extended_state_info());
-    println!("cpuid_Brand{:?}", cpuid.get_processor_brand_string())
-}
+    println!("[cpuid_Vendor]{:?}", cpuid.get_vendor_info());
+    println!("[cpuid_Feature]{:?}", cpuid.get_feature_info());
+    println!("[cpuid_Extended_Feature]{:?}", cpuid.get_extended_feature_info());
+    println!("[cpuid_Extended_State]{:?}", cpuid.get_extended_state_info());
+    println!("[cpuid_Brand]{:?}", cpuid.get_processor_brand_string());
 
+    // 寻找大核
+    // unimplemented!()
+    // cpuid根本就找不到！气死我了 直接动态跑分吧
+}

@@ -15,16 +15,13 @@ use crate::error::handle_fatal;
 use crate::graphics::Screen;
 use crate::video::video_run;
 
-use crate::test::get_multi_monitor::get_multi_monitor;
-
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().expect("Failed to init UEFI");
 
 
-    // let mut screen = Screen::new().expect("Failed to create screen");
-    // video_run(&mut screen).unwrap_or_else(|e| handle_fatal(e, screen));
-    get_multi_monitor();
+    let mut screen = Screen::new().expect("Failed to create screen");
+    video_run(&mut screen).unwrap_or_else(|e| handle_fatal(e, screen));
 
     boot::stall(Duration::from_mins(2));
     Status::SUCCESS

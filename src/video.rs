@@ -31,18 +31,20 @@ pub fn video_run(screen: &mut Screen) -> Result {
     // let mut blt = BltFrameBuffer::new(SIZE);
     // let mut video = VideoMemory::new(file)?;
     let mut video_raw = VideoMemoryRaw::new(file)?;
-    screen.draw_u64_optimized_loop(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
+    // screen.parallel_video_draw_ultra(&mut video_raw, WIDTH, HEIGHT)?;
+    // screen.draw_u64_optimized_loop(&mut video_raw, WIDTH, HEIGHT); // SUPER UNSAFE!!
+    // draw_u64_optimized_multi_core
 
-    loop {
-        // draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
-        // draw_all_mem(&mut video, screen, &mut qoi, &mut raw, &mut blt)?;
-        // draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;  // UNSAFE!!
-        // screen.draw_all_mem_raw_zero_copy(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
-        // screen.draw_fast_direct_copy(&mut video_raw, WIDTH, HEIGHT);      // UNSAFE!!
-        // boot::stall(Duration::from_millis(1000 / 90));
-    }
+    // loop {
+    //     draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
+    //     draw_all_mem(&mut video, screen, &mut qoi, &mut raw, &mut blt)?;
+    //     draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;  // UNSAFE!!
+    //     screen.draw_all_mem_raw_zero_copy(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
+    //     screen.draw_fast_direct_copy(&mut video_raw, WIDTH, HEIGHT);      // UNSAFE!!
+    //     boot::stall(Duration::from_millis(1000 / 90));
+    // }
 
-    // Ok(())
+    Ok(())
 }
 
 fn draw_once(fs: &mut Fs, screen: &mut Screen, path: &CStr16, blt_buf: &mut [BltPixel]) -> Result {

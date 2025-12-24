@@ -68,8 +68,6 @@ fn println(gop: &mut ScopedProtocol<GraphicsOutput>, text: &str) {
     unsafe { OFFSET += 18 }
 }
 
-// 经过测试发现大部分GOP驱动都只支持给我一个Handle(也就是一个显示器)
-// 那多显示器已经毫无意义，已经回滚到单显示器
 pub fn get_multi_mode() {
     let gop = get_handle_for_protocol::<GraphicsOutput>().unwrap();
     let mut gop = open_protocol_exclusive::<GraphicsOutput>(gop).unwrap();
@@ -89,7 +87,8 @@ pub fn get_multi_mode() {
     println(&mut gop, &info2str("current mode", info))
 }
 
-// 很遗憾 启动的时候默认只启动一个屏幕
+// 经过测试发现大部分GOP驱动都只支持给我一个Handle(也就是一个显示器)
+// 那多显示器已经毫无意义，已经回滚到单显示器
 pub fn get_multi_monitor() {
     let handle = find_handles::<GraphicsOutput>().expect("Failed to find handles");
 

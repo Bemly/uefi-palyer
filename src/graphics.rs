@@ -1,5 +1,9 @@
+use alloc::vec::Vec;
+use core::ffi::c_void;
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtocol};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
+use uefi::proto::pi::mp::MpServices;
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::VideoMemoryRaw;
@@ -185,7 +189,7 @@ impl Screen {
             if is_continuous {
                 // 全屏连续拷贝
                 let total_bytes = width * height * 4;
-                self.u64_fast_copy(src_ptr, dest_ptr, total_bytes);
+                u64_fast_copy(src_ptr, dest_ptr, total_bytes);
             } else {
                 // 按行拷贝（处理 Stride）
                 let row_bytes = width * 4;
@@ -193,52 +197,9 @@ impl Screen {
                 for y in 0..height {
                     let row_src = src_ptr.add(y * row_bytes);
                     let row_dest = dest_ptr.add(y * stride_bytes);
-                    self.u64_fast_copy(row_src, row_dest, row_bytes);
+                    u64_fast_copy(row_src, row_dest, row_bytes);
                 }
             }
-        }
-    }
-
-    #[inline(always)]
-    unsafe fn u64_fast_copy(&self, src: *const u8, dst: *mut u8, len: usize) {
-        let mut i = 0;
-
-        // 1. 核心循环：展开 8 倍 (每次处理 64 字节)
-        // 使用 u64 (8字节) * 8 = 64字节，正好匹配一个 Cache Line
-        while i + 64 <= len {
-            // 使用 read_unaligned 防止 src 不对齐，write_volatile 确保写入显存不经过缓存
-            let s0 = (src.add(i) as *const u64).read_unaligned();
-            let s1 = (src.add(i + 8) as *const u64).read_unaligned();
-            let s2 = (src.add(i + 16) as *const u64).read_unaligned();
-            let s3 = (src.add(i + 24) as *const u64).read_unaligned();
-            let s4 = (src.add(i + 32) as *const u64).read_unaligned();
-            let s5 = (src.add(i + 40) as *const u64).read_unaligned();
-            let s6 = (src.add(i + 48) as *const u64).read_unaligned();
-            let s7 = (src.add(i + 56) as *const u64).read_unaligned();
-
-            (dst.add(i) as *mut u64).write_volatile(s0);
-            (dst.add(i + 8) as *mut u64).write_volatile(s1);
-            (dst.add(i + 16) as *mut u64).write_volatile(s2);
-            (dst.add(i + 24) as *mut u64).write_volatile(s3);
-            (dst.add(i + 32) as *mut u64).write_volatile(s4);
-            (dst.add(i + 40) as *mut u64).write_volatile(s5);
-            (dst.add(i + 48) as *mut u64).write_volatile(s6);
-            (dst.add(i + 56) as *mut u64).write_volatile(s7);
-
-            i += 64;
-        }
-
-        // 2. 补漏循环：每次 8 字节
-        while i + 8 <= len {
-            let val = (src.add(i) as *const u64).read_unaligned();
-            (dst.add(i) as *mut u64).write_volatile(val);
-            i += 8;
-        }
-
-        // 3. 尾部处理：处理不足 8 字节的散碎字节
-        while i < len {
-            dst.add(i).write_volatile(src.add(i).read());
-            i += 1;
         }
     }
 
@@ -253,5 +214,49 @@ impl Screen {
             self.draw_u64_optimized(video, width, height, stride, is_continuous, dest_ptr);
         }
     }
+
+    pub fn parallel_video_draw(&mut self, video: &mut VideoMemoryRaw, width: usize, height: usize) -> Result {
+        let mp_handle = get_handle_for_protocol::<MpServices>()?;
+        let mp_services = open_protocol_exclusive::<MpServices>(mp_handle)?;
+
+        // 1. 识别所有可用的 AP（排除主核 BSP）
+        let proc_count = mp_services.get_number_of_processors()?;
+
+        Ok(())
+    }
+
 }
 
+/// 极致性能的底层拷贝函数（无 self 依赖）
+#[inline(always)]
+unsafe fn u64_fast_copy(src: *const u8, dst: *mut u8, len: usize) {
+    let mut i = 0;
+    while i + 64 <= len {
+        let s0 = (src.add(i) as *const u64).read_unaligned();
+        let s1 = (src.add(i + 8) as *const u64).read_unaligned();
+        let s2 = (src.add(i + 16) as *const u64).read_unaligned();
+        let s3 = (src.add(i + 24) as *const u64).read_unaligned();
+        let s4 = (src.add(i + 32) as *const u64).read_unaligned();
+        let s5 = (src.add(i + 40) as *const u64).read_unaligned();
+        let s6 = (src.add(i + 48) as *const u64).read_unaligned();
+        let s7 = (src.add(i + 56) as *const u64).read_unaligned();
+
+        (dst.add(i) as *mut u64).write_volatile(s0);
+        (dst.add(i + 8) as *mut u64).write_volatile(s1);
+        (dst.add(i + 16) as *mut u64).write_volatile(s2);
+        (dst.add(i + 24) as *mut u64).write_volatile(s3);
+        (dst.add(i + 32) as *mut u64).write_volatile(s4);
+        (dst.add(i + 40) as *mut u64).write_volatile(s5);
+        (dst.add(i + 48) as *mut u64).write_volatile(s6);
+        (dst.add(i + 56) as *mut u64).write_volatile(s7);
+        i += 64;
+    }
+    while i + 8 <= len {
+        (dst.add(i) as *mut u64).write_volatile((src.add(i) as *const u64).read_unaligned());
+        i += 8;
+    }
+    while i < len {
+        dst.add(i).write_volatile(src.add(i).read());
+        i += 1;
+    }
+}
