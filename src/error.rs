@@ -1,4 +1,5 @@
 use alloc::format;
+use alloc::string::String;
 use core::fmt::Debug;
 use uefi::boot::stall;
 use core::time::Duration;
@@ -12,6 +13,7 @@ pub enum NyaStatus<Data: Debug = ()> {
     FromStrWithBufError,
     Qoi(qoi::Error),
     NotRegularFile,
+    _Debug(String),
     _Reserve,
 }
 
@@ -31,7 +33,7 @@ impl From<qoi::Error> for NyaStatus {
 }
 
 // 垫底的错误处理，至少是安全的输出内容（大雾
-pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
+pub fn handle_fatal(err: NyaStatus, screen: &mut Screen) -> ! {
     let _ = screen.clear();
 
     // 可变参数宏简化
@@ -43,6 +45,7 @@ pub fn handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
 
     match err {
         NyaStatus::Qoi(err) => println!("QOI error: {}", err),
+        NyaStatus::_Debug(err) => screen.draw_str(&err),
         _ => println!("FATAL ERROR: {:?}", err),
     }
 
@@ -84,6 +87,7 @@ pub fn _handle_fatal(err: NyaStatus, mut screen: Screen) -> ! {
 
     match err {
         NyaStatus::Qoi(err) => println!("QOI error: {}", err),
+        NyaStatus::_Debug(err) => println!("{}", err),
         _ => println!("FATAL ERROR: {:?}", err),
     };
 

@@ -1,6 +1,3 @@
-use alloc::vec::Vec;
-use core::ffi::c_void;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtocol};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use uefi::proto::pi::mp::MpServices;
@@ -57,7 +54,7 @@ impl Screen {
         let bg = BltPixel::new(0, 0, 0);
 
         // 防止超出高度
-        if self.stdout + 18 >= height { self.stdout = 0 }
+        if self.stdout + 20 >= height { self.stdout = 0 }
 
         for c in text.chars() {
             // --- 1. 处理换行逻辑 ---
@@ -65,14 +62,16 @@ impl Screen {
             // 显式换行符处理
             if c == '\n' {
                 x = 0;
-                self.stdout += 16; // 换行高度（点阵16像素 + 2像素间距）
+                self.stdout += 18; // 换行高度（点阵16像素 + 2像素间距）
+                if self.stdout >= height { self.stdout = 0 }
                 continue;
             }
 
             // 超出屏幕宽度自动换行 (8 是字符宽度)
             if x + 8 > width {
                 x = 0;
-                self.stdout += 16;
+                self.stdout += 18;
+                if self.stdout >= height { self.stdout = 0 }
             }
 
             // --- 2. 绘制字符 ---

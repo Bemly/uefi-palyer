@@ -1,12 +1,17 @@
-use uefi::boot::set_watchdog_timer;
-use uefi::{cstr16, CStr16};
-use uefi::proto::console::gop::BltPixel;
-use uefi::proto::media::file::RegularFile;
+use alloc::boxed::Box;
+use alloc::{format, vec};
+use alloc::vec::Vec;
+use core::ffi::c_void;
+use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, set_watchdog_timer, EventType, Tpl};
+use uefi::{cstr16, println, CStr16, Status};
+use uefi::proto::console::gop::{BltPixel, GraphicsOutput};
+use uefi::proto::media::file::{File, FileInfo, RegularFile};
+use uefi::proto::pi::mp::MpServices;
 use crate::fs::Fs;
 use crate::graphics::Screen;
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
-use crate::error::Result;
+use crate::error::{handle_fatal, NyaStatus, Result};
 
 pub mod buffer;
 pub mod decoder;
@@ -20,8 +25,6 @@ pub fn video_run(screen: &mut Screen) -> Result {
 
     const WIDTH: usize = 1920;
     const HEIGHT: usize = 1080;
-    // const WIDTH: usize = 1280;
-    // const HEIGHT: usize = 720;
     const SIZE: usize = WIDTH * HEIGHT;
 
     let mut fs = Fs::new()?;
@@ -30,10 +33,10 @@ pub fn video_run(screen: &mut Screen) -> Result {
     // let mut raw = RawFrameBuffer::new(SIZE);
     // let mut blt = BltFrameBuffer::new(SIZE);
     // let mut video = VideoMemory::new(file)?;
-    let mut video_raw = VideoMemoryRaw::new(file)?;
+    // let mut video_raw = VideoMemoryRaw::new(file)?;
     // screen.parallel_video_draw_ultra(&mut video_raw, WIDTH, HEIGHT)?;
     // screen.draw_u64_optimized_loop(&mut video_raw, WIDTH, HEIGHT); // SUPER UNSAFE!!
-    // draw_u64_optimized_multi_core
+    mp_draw(screen, &mut file, WIDTH, HEIGHT)?;
 
     // loop {
     //     draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
@@ -190,6 +193,201 @@ fn draw(
         // 从头读
         file.set_position(0)?;
     }
+
+    Ok(())
+}
+
+type PixelPoint = u8;
+type Frame = Vec<PixelPoint>;
+type FrameSegment = Vec<Frame>;
+type CoreFrameSegment = Vec<FrameSegment>;
+
+#[repr(C)]
+struct PlayTask<'a> {
+    mp: &'a MpServices, // 用于 who_am_i
+    fb_base: *mut u8,
+    stride_bytes: usize,
+    width: usize,
+    height: usize,
+    num_cores: usize,
+    // core_frames[核心ID][帧ID] -> 这一帧该核负责的像素切片
+    // 注意：这里需要是指针的指针，因为 AP 无法直接访问 Vec 的元数据
+    core_frame_ptrs: *const *const *const u8,
+    total_frames: usize,
+}
+
+extern "efiapi" fn play_task(arg: *mut c_void) {
+    if arg.is_null() { return; }
+    let ctx = unsafe { &*(arg as *const PlayTask) };
+    let mp = unsafe { &*ctx.mp };
+
+    // 1. 现场确认身份
+    let my_id = mp.who_am_i().unwrap_or(0);
+    if my_id >= ctx.num_cores { return; }
+
+    // 2. 计算属于自己的显存位置
+    let rows_per_core = ctx.height / ctx.num_cores;
+    let y_start = my_id * rows_per_core;
+    let my_fb_ptr = unsafe { ctx.fb_base.add(y_start * ctx.stride_bytes) };
+
+    // 3. 计算属于自己的数据包位置
+    // ctx.core_frame_ptrs[my_id] 指向该核心的帧地址列表
+    let my_frames_list = unsafe { *ctx.core_frame_ptrs.add(my_id) };
+
+    let mut frame_idx = 0;
+    let my_block_size = if my_id == ctx.num_cores - 1 {
+        (ctx.height - y_start) * ctx.stride_bytes
+    } else {
+        rows_per_core * ctx.stride_bytes
+    };
+
+    loop {
+        unsafe {
+            let src_ptr = *my_frames_list.add(frame_idx);
+            core::ptr::copy_nonoverlapping(src_ptr, my_fb_ptr, my_block_size);
+        }
+
+        frame_idx = (frame_idx + 1) % ctx.total_frames;
+        // 如果播放太快，可以在这里加个计数器延迟
+        // core::hint::spin_loop();
+    }
+}
+
+pub fn mp_draw(screen: &mut Screen, file: &mut RegularFile, width: usize, height: usize) -> Result {
+    // 1 解码
+    let mp_handle = get_handle_for_protocol::<MpServices>()?;
+    let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
+    let n_cores = mp.get_number_of_processors()?.enabled;
+    let mut info_buf = vec![0u8; 128];
+    let info = loop {
+        match file.get_info::<FileInfo>(&mut info_buf) {
+            Ok(info) => break info,
+            Err(e) if e.status() == Status::BUFFER_TOO_SMALL => {
+                if let Some(size) = *e.data() { info_buf.resize(size, 0) }
+            }
+            Err(e) => return Err(e.status())?,
+        }
+    };
+    let mut compressed_buffer = vec![0u8; info.file_size() as usize];
+    file.read(&mut compressed_buffer).map_err(|e| e.status())?;
+
+    // 准备核心存储容器: [核心ID][帧ID] -> 这一帧该核负责的像素切片
+    let mut core_frames: CoreFrameSegment = (0..n_cores).map(|_| Vec::new()).collect();
+    let mut offset = 0;
+
+    let (scr_width, scr_height) = screen.get_gop().current_mode_info().resolution();
+    let rows_per_core = scr_height / n_cores;
+
+    let fb_base = screen.get_gop().frame_buffer().as_mut_ptr();
+    let scr_stride = screen.get_gop().current_mode_info().stride();
+
+    // 原始单帧空间初始化
+    let mut single_raw: Frame = vec![0u8; width * height * 4];
+    // 文件末尾越界保护
+    while offset + 4 <= compressed_buffer.len() {
+        let len_bytes = &compressed_buffer[offset..offset + 4];
+        let frame_len =
+            u32::from_le_bytes([len_bytes[0], len_bytes[1], len_bytes[2], len_bytes[3]]) as usize;
+        let data_start = offset + 4;
+        let next_frame_pos = data_start + frame_len;
+
+        if next_frame_pos > compressed_buffer.len() { break }
+
+        // 获取当前Qoi帧
+        let frame_data = &compressed_buffer[data_start..next_frame_pos];
+
+        if qoi::decode_to_buf(&mut single_raw, frame_data).is_err() {
+            offset = next_frame_pos;
+            continue
+        }
+
+        // 红蓝交换 (RGBA -> BGRA)
+        for chunk in single_raw.chunks_exact_mut(4) {
+            chunk.swap(0, 2);
+        }
+
+        // 核心切分
+        for core_id in 0..n_cores {
+            let y_start = core_id * rows_per_core; // 该核心负责的屏幕起始行
+            let y_end = if core_id == n_cores - 1 { scr_height } else { y_start + rows_per_core };
+
+            let mut frame: Frame = Vec::new();
+            let stride_bytes = scr_stride * 4; // 屏幕物理跨度
+            let row_bytes = width * 4;        // 视频实际宽度
+
+            for y in y_start..y_end {
+                let video_y = y;
+
+                if video_y < height {
+                    // 只有当屏幕行落在视频高度范围内时，才去 single_raw 拿数据
+                    let src_row_start = video_y * width * 4;
+                    let src_row_end = src_row_start + row_bytes;
+
+                    if src_row_end > single_raw.len() {
+                        Err(Status::INVALID_PARAMETER)?
+                    }
+
+                    // 1. 拷贝视频行
+                    frame.extend_from_slice(&single_raw[src_row_start..src_row_end]);
+
+                    // 2. 补齐当前行到屏幕的 stride 跨度
+                    if stride_bytes > row_bytes {
+                        let padding = stride_bytes - row_bytes;
+                        frame.resize(frame.len() + padding, 0u8);
+                    }
+                } else {
+                    // 如果屏幕行超过了视频高度，这一行全是黑的（但也要占满 stride 长度）
+                    frame.resize(frame.len() + stride_bytes, 0u8);
+                }
+            }
+            core_frames[core_id].push(frame);
+        }
+        offset = next_frame_pos;
+    }
+
+    // 2 构造参数
+    let stride_bytes = scr_stride * 4;
+
+    // 用来存储所有核心任务包的指针
+
+    // --- 准备指针矩阵 ---
+    // 我们需要把 Vec<Vec<Vec<u8>>> 转换成三级指针，方便 AP 访问
+    let mut all_core_lists = Vec::new();
+    for core_id in 0..n_cores {
+        let frame_addrs: Vec<*const u8> = core_frames[core_id].iter().map(|f| f.as_ptr()).collect();
+        all_core_lists.push(Box::leak(frame_addrs.into_boxed_slice()).as_ptr());
+    }
+    let core_frame_ptrs = Box::leak(all_core_lists.into_boxed_slice()).as_ptr();
+
+    let (scr_width, scr_height) = screen.get_gop().current_mode_info().resolution();
+    let scr_stride = screen.get_gop().current_mode_info().stride();
+    let fb_base = screen.get_gop().frame_buffer().as_mut_ptr();
+
+    // --- 构造统一 Context ---
+    let ctx = Box::leak(Box::new(PlayTask {
+        mp: &mp,
+        fb_base,
+        stride_bytes: scr_stride * 4,
+        width,
+        height: scr_height,
+        num_cores: n_cores,
+        core_frame_ptrs,
+        total_frames: core_frames[0].len(),
+    }));
+
+    let arg_ptr = ctx as *mut _ as *mut c_void;
+
+    let event = unsafe { create_event(EventType::empty(), Tpl::CALLBACK, None, None)? };
+
+    // --- 启动 AP ---
+    if n_cores > 1 {
+        // 使用你彩色代码中成功的 startup_all_aps
+        // 注意：如果你需要它不阻塞持续播放，这里要设置为 false (非阻塞启动)
+        let _ = mp.startup_all_aps(false, play_task, arg_ptr, Some(event), None);
+    }
+
+    // --- BSP 亲自执行 ---
+    play_task(arg_ptr);
 
     Ok(())
 }
