@@ -47,10 +47,13 @@ impl Screen {
     pub fn draw_str(&mut self, text: &str) {
         let mut x = 0;
         // 获取当前屏幕的宽度，用于自动换行
-        let (width, _) = self.gop.current_mode_info().resolution();
+        let (width, height) = self.gop.current_mode_info().resolution();
 
         let fg = BltPixel::new(255, 255, 255);
         let bg = BltPixel::new(0, 0, 0);
+
+        // 防止超出高度
+        if self.stdout + 18 >= height { self.stdout = 0 }
 
         for c in text.chars() {
             // --- 1. 处理换行逻辑 ---
