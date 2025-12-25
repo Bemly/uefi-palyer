@@ -1,5 +1,8 @@
 /target
-.cargo/
-.idea/
-.codebuddy/
-db/
+/.cargo
+/.idea
+/.codebuddy
+/db
+NvVars
+Cargo.lock
+.DS_Store
