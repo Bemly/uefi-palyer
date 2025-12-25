@@ -3,8 +3,9 @@ use alloc::{format, vec};
 use alloc::vec::Vec;
 use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
+use core::time::Duration;
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, set_watchdog_timer, EventType, Tpl};
-use uefi::{cstr16, println, CStr16, Status};
+use uefi::{boot, cstr16, println, CStr16, Status};
 use uefi::proto::console::gop::{BltPixel, GraphicsOutput};
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 use uefi::proto::pi::mp::MpServices;
@@ -13,6 +14,7 @@ use crate::graphics::Screen;
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
 use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
 use crate::error::{handle_fatal, NyaStatus, Result};
+use crate::video::ascii_font::FONT_8X16;
 
 pub mod buffer;
 pub mod decoder;
@@ -222,7 +224,7 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
     if arg.is_null() { return; }
     let ctx = unsafe { &*(arg as *const PlayTask) };
 
-    let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(0) };
+    let my_id = unsafe { (*ctx.mp).who_am_i().unwrap_or(usize::MAX) };
     if my_id >= ctx.num_cores { return; }
 
     // 核心参数计算
@@ -236,32 +238,152 @@ extern "efiapi" fn play_task(arg: *mut c_void) {
         rows_per_core * ctx.stride_bytes
     };
 
-    // 使用我们传入的原子计数器来控制进度
-    // 我们定义：frame_idx = sync_counter / num_cores
-    loop {
-        // 1. 获取当前大家共有的帧索引
-        // 这里不能直接 fetch_add，因为每个核都要用同一个值写完这一轮
-        let current_count = ctx.sync_counter.load(Ordering::Acquire);
-        let frame_idx = (current_count / ctx.num_cores) % ctx.total_frames;
+    let mut local_frame_idx = 0;
+    let n_cores = ctx.num_cores;
+    // 初始化第一个目标值：第一帧写完时，计数器应该达到 n_cores
+    let mut my_next_target = n_cores;
 
-        // 2. 搬运属于自己的那一块数据
+    // 计算帧率
+    let ticks_per_sec;
+    let target_ticks_per_frame;
+    const TARGET_FPS: u128 = 60;
+    if my_id == 0 {
+        boot::stall(Duration::from_millis(100));
+        // 采样时间太短（如 1ms）误差大，太长（如 1s）启动慢，100ms 是黄金平衡点
+        let start = unsafe { core::arch::x86_64::_rdtsc() };
+        boot::stall(Duration::from_millis(100));
+        let end = unsafe { core::arch::x86_64::_rdtsc() };
+
+        ticks_per_sec = ((end - start) * 10) as u128;
+
+        // 如果你跑的是 120Hz 视频，这里必须是 120
+        target_ticks_per_frame = ticks_per_sec / 120;
+    } else {
+        ticks_per_sec = 0;
+        target_ticks_per_frame = 0;
+    }
+
+    /// 绘制不透明字符串：位图为 1 画 color，位图为 0 画黑色
+    unsafe fn draw_string_opaque(fb_base: *mut u32, stride: usize, x: u32, y: u32, s: &[u8], color: u32) {
+        let mut current_x = x;
+        for &char_code in s {
+            // 只有 ASCII 0-127 有效
+            let glyph = FONT_8X16[(char_code & 0x7F) as usize];
+
+            for row in 0..16 {
+                let row_data = glyph[row];
+                let row_ptr = fb_base.add(((y + row as u32) * stride as u32 + current_x) as usize);
+
+                for col in 0..8 {
+                    // 直接判断位并写入，不再调用 draw_pixel 减少重复计算
+                    // FONT_8X16 通常高位在左：0x80 >> col
+                    let pixel_color = if (row_data << col) & 0x80 != 0 {
+                        color
+                    } else {
+                        0x000000 // 背景黑
+                    };
+
+                    row_ptr.add(col).write_volatile(pixel_color);
+                }
+            }
+            current_x += 8;
+        }
+    }
+
+    let mut start_ticks = unsafe { core::arch::x86_64::_rdtsc() };
+    let mut fps_counter = 0;
+    let mut last_sample_ticks = unsafe { core::arch::x86_64::_rdtsc() };
+    let stride = (ctx.stride_bytes / 4) as usize;
+    let ui_height = 20;
+    let start_y = ui_height;
+    let end_y = (ctx.height / 4) as usize;
+    let dst_ptr = ctx.fb_base as *mut u32;
+
+    // 计算偏移量和拷贝大小（也是固定的）
+    let offset = start_y * stride;
+    let copy_size = if end_y > start_y { (end_y - start_y) * stride } else { 0 };
+    loop {
+        // 1. 搬运 (生产)
         unsafe {
-            let src_ptr = *my_frames_list.add(frame_idx);
-            core::ptr::copy_nonoverlapping(src_ptr, my_fb_ptr, my_block_size);
+            if my_id == 0 {
+                // 1. 获取当前帧的源地址（这个不能移出去，因为每帧 index 不同）
+                let src_frame_base = unsafe { *my_frames_list.add(local_frame_idx) as *const u32 };
+
+                // 2. 镂空搬运
+                if copy_size > 0 {
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(
+                            src_frame_base.add(offset), // 基于当前帧地址偏移
+                            dst_ptr.add(offset),        // 基于显存地址偏移
+                            copy_size
+                        );
+                    }
+                }
+            }else {
+                let src_ptr = *my_frames_list.add(local_frame_idx);
+                core::ptr::copy_nonoverlapping(src_ptr, my_fb_ptr, my_block_size);
+            }
+
         }
 
-        // 3. 同步：完成任务，打卡签到
-        // 每个核完成一帧的局部拷贝后，给原子变量 +1
+        // 2. 打卡 (原子加法)
+        // fetch_add 本身会返回旧值，但我们这里直接加，不关心返回值
         ctx.sync_counter.fetch_add(1, Ordering::SeqCst);
 
-        // 4. 等待其他核心。只有当所有核心都写完了这一帧，
-        // sync_counter 才会达到 (frame_idx + 1) * num_cores
-        let target = (current_count / ctx.num_cores + 1) * ctx.num_cores;
-        while ctx.sync_counter.load(Ordering::Acquire) < target {
-            core::hint::spin_loop(); // 自旋等待“慢队友”
+        // 3. 自旋等待 (无除法)
+        // 所有人都在等计数器达到本轮的 my_next_target
+        while ctx.sync_counter.load(Ordering::Acquire) < my_next_target {
+            core::hint::spin_loop();
         }
 
-        // 此时，大家一起跳出循环，进入下一轮 loop，重新计算新的 frame_idx
+        // 4. 只有 0 号核做统计（可选，且不影响同步）
+        if my_id == 0 {
+            let end_ticks = unsafe { core::arch::x86_64::_rdtsc() };
+            let delta_ticks = (end_ticks - start_ticks) as u128;
+
+            // 1. 计算当前帧耗时和余量
+            let ft_us = (delta_ticks * 1_000_000) / ticks_per_sec;
+            let margin_us = if target_ticks_per_frame > delta_ticks {
+                ((target_ticks_per_frame - delta_ticks) * 1_000_000) / ticks_per_sec
+            } else {
+                0
+            };
+
+            fps_counter += 1;
+            // 每 64 帧更新一次显示
+            if (fps_counter & 63) == 0 {
+                // --- 核心修正：计算被漏掉的 fps ---
+                let total_span = end_ticks.saturating_sub(last_sample_ticks);
+                // 既然是 64 帧更新一次，公式就是 (64 * 频率) / 总耗时
+                let fps = (64 * ticks_per_sec) / (total_span as u128);
+
+                last_sample_ticks = end_ticks;
+
+                let fb = ctx.fb_base as *mut u32;
+                // 注意：stride 必须是像素跨度，确保你在 loop 外已经算好了 stride = stride_bytes / 4
+
+                // --- 绘制逻辑 ---
+                let fps_str = format!("FPS: {:>4}", fps);
+                let ft_str  = format!("FT: {:>5} us", ft_us);
+                let mg_str  = format!("Margin: {:>5} us", margin_us);
+
+                unsafe {
+                    // 并排显示在最顶层 (y=0)
+                    draw_string_opaque(fb, stride, 0,   0, fps_str.as_bytes(), 0x00FF00); // 绿色
+                    draw_string_opaque(fb, stride, 200, 0, ft_str.as_bytes(), 0x00FFFF);  // 青色
+                    draw_string_opaque(fb, stride, 450, 0, mg_str.as_bytes(), 0xFFA500);  // 橙色
+                }
+            }
+
+            start_ticks = end_ticks;
+        }
+
+        // 5. 为下一轮做准备 (全是加法)
+        my_next_target += n_cores;
+        local_frame_idx += 1;
+        if local_frame_idx >= ctx.total_frames {
+            local_frame_idx  = 0;
+        }
     }
 }
 
