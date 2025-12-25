@@ -143,22 +143,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3c8dda44ff03a2f238717214da50f65d5a53b45cd213a7370424ffdb6fae815"
 
 [[package]]
-name = "myuefi"
-version = "0.2.0"
-dependencies = [
- "dmidecode",
- "embedded-graphics",
- "embedded-graphics-gop",
- "less-avc",
- "log",
- "qoicoubeh",
- "raw-cpuid",
- "shiguredo_mp4",
- "u8g2-fonts",
- "uefi",
-]
-
-[[package]]
 name = "num-traits"
 version = "0.2.19"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -296,6 +280,22 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn",
+]
+
+[[package]]
+name = "uefi-palyer"
+version = "0.2.4"
+dependencies = [
+ "dmidecode",
+ "embedded-graphics",
+ "embedded-graphics-gop",
+ "less-avc",
+ "log",
+ "qoicoubeh",
+ "raw-cpuid",
+ "shiguredo_mp4",
+ "u8g2-fonts",
+ "uefi",
 ]
 
 [[package]]
