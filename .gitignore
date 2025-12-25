@@ -1,1 +1,5 @@
 /target
+.cargo/
+.idea/
+.codebuddy/
+db/
