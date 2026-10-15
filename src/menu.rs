@@ -63,11 +63,12 @@ pub fn run_menu(mut screen: Screen) -> ! {
                     Entry::Exclusive(f) => {
                         // 该 demo 需要自己独占 GOP（含切显示模式），
                         // 先释放 Screen 再跑，跑完重建 Screen 回菜单。
+                        // 注意：这里不清屏——demo 画面要留给用户看，
+                        // 提示行打在底部。
                         drop(screen);
                         let result = f();
                         screen = Screen::new().expect("Failed to re-create screen");
-                        let _ = screen.clear();
-                        screen.reset_cursor();
+                        screen.cursor_to_bottom();
                         match result {
                             Ok(()) => pause_return(&mut screen),
                             Err(e) => show_recoverable(&mut screen, e),

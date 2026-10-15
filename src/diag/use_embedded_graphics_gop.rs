@@ -31,9 +31,12 @@ pub fn run() -> Result {
     // Create the draw target utilizing the configured protocol.
     let mut target =
         BltDrawTarget::new(&mut protocol).map_err(|e| NyaStatus::_Debug(alloc::format!("{:?}", e)))?;
-    // Make it double-buffered
+    // Make it double-buffered.
+    // 注意：embedded-graphics-gop 0.4.x 里单缓冲模式下 draw 只进内部
+    // backbuffer、commit() 是 no-op，想要上屏必须开双缓冲 + commit。
+    // 原代码传 false 导致有 Ok 无画面，已修正。
     target
-        .double_buffer(false)
+        .double_buffer(true)
         .map_err(|e| NyaStatus::_Debug(alloc::format!("{:?}", e)))?;
 
     // ...draw on it...

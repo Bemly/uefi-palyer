@@ -22,6 +22,13 @@ impl Screen {
     /// 把文本光标复位到左上角（配合 `clear()` 在菜单/报错切屏时用）。
     pub fn reset_cursor(&mut self) { self.stdout = 0; }
 
+    /// 把文本光标移到屏幕底部（独占 GOP 的 demo 跑完后用：
+    /// 画面要留给用户看，不能 `clear()`，提示行打在底部避免盖住内容）。
+    pub fn cursor_to_bottom(&mut self) {
+        let (_, height) = self.gop.current_mode_info().resolution();
+        self.stdout = height.saturating_sub(40);
+    }
+
     pub fn draw_image(&mut self, width: u32, height: u32, pixels: &[BltPixel]) -> Result {
         // 我不知道为什么封装成这样了，但是它能工作！
         // 默认blt输出uefi::result::Result，这里?拆包然后Ok封装为crate::error::Result
