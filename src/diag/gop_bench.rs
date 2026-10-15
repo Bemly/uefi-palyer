@@ -187,25 +187,31 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
     };
     tline!(report, screen, "mp: {} enabled core(s)", n_cores);
 
-    // 单核：BSP 自己填整屏。
+    // 单核：BSP 自己填整屏，5 轮平均（与多核计时轮对称，消单发噪声）。
+    const SINGLE_ROUNDS: u64 = 5;
     let t0 = rdtsc();
-    {
+    for _ in 0..SINGLE_ROUNDS {
         let mut fb = screen.get_gop().frame_buffer();
         let dst = fb.as_mut_ptr();
         let stride_bytes = stride * 4;
         unsafe { fill_rows(dst, stride_bytes, w, 0, h, 0x0011_2233_0011_2233) };
     }
     let dt_single = rdtsc() - t0;
-    let single_ms = dt_single as f64 * 1000.0 / tps as f64;
+    let single_ms = dt_single as f64 * 1000.0 / (SINGLE_ROUNDS as f64 * tps as f64);
     tline!(
         report,
         screen,
         "fb fill 1 core: {:.2} ms ({:.1} MB/s)",
         single_ms,
-        fb_bytes as f64 * tps as f64 / (dt_single as f64 * 1024.0 * 1024.0)
+        (SINGLE_ROUNDS * fb_bytes as u64) as f64 * tps as f64
+            / (dt_single as f64 * 1024.0 * 1024.0)
     );
 
-    // 多核：AP 与 BSP 并发各填各的行区，5 秒超时熔断。
+    // 多核：AP 常驻工作循环，BSP 发轮次号并行填。
+    // 注意：单发 startup 测到的是 AP 唤醒开销（SIPI，十几 ms），不是扩展性——
+    // 实测单核填整屏才 0.66ms，唤醒就把并行收益全淹了。所以这里 AP 起一次
+    // 常驻循环，先热身 1 轮吸收唤醒延迟，再计时多轮取平均，测的是稳态吞吐。
+    // 每轮 5 秒超时熔断，超时按部分结果报告，不炸整个测试。
     if n_cores > 1 {
         let mp_handle = get_handle_for_protocol::<MpServices>()?;
         let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
@@ -214,6 +220,7 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
         let mut fb = screen.get_gop().frame_buffer();
         let fb_base = fb.as_mut_ptr();
         // 取裸指针后结束 GOP 借用：AP 与 BSP 只走裸指针，不再经过协议。
+        let round = AtomicUsize::new(0);
         let done = AtomicUsize::new(0);
         let ctx = FillCtx {
             mp: &mp,
@@ -222,35 +229,52 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
             width: fw,
             height: fh,
             n: n_cores,
+            round: &round,
             done: &done,
         };
         let arg_ptr = &ctx as *const _ as *mut c_void;
         let event = unsafe { create_event(EventType::empty(), Tpl::CALLBACK, None, None)? };
         let my_id = mp.who_am_i().unwrap_or(0) % n_cores;
+        let (by0, by1) = rows_for(my_id, n_cores, fh);
+        let stride_b = fst * 4;
+        let expected_aps = n_cores - 1;
 
-        let t0 = rdtsc();
-        mp.startup_all_aps(false, ap_fill_task, arg_ptr, Some(event), None)
+        // 非阻塞启动：AP 进常驻循环，BSP 不等。
+        mp.startup_all_aps(false, ap_fill_loop, arg_ptr, Some(event), None)
             .map_err(|e| e.status())?;
-        // BSP 与 AP 并发：填自己那份行区。
-        let rows = rows_for(my_id, n_cores, fh);
-        unsafe {
-            fill_rows(
-                fb_base,
-                fst * 4,
-                fw,
-                rows.0,
-                rows.1,
-                0x0044_5566_0044_5566,
-            )
-        };
-        // 自旋等 AP，上限 5 秒；超时则按部分结果报告，不炸整个测试。
-        let deadline = t0 + 5 * tps.max(1);
-        while done.load(Ordering::Acquire) < n_cores - 1 && rdtsc() < deadline {
+
+        // 热身轮（round 1，不计时）：吸收 AP 唤醒延迟。
+        round.store(1, Ordering::SeqCst);
+        unsafe { fill_rows(fb_base, stride_b, fw, by0, by1, 0x0044_5566_0044_5566) };
+        let deadline = rdtsc() + 5 * tps.max(1);
+        while done.load(Ordering::Acquire) < expected_aps && rdtsc() < deadline {
             core::hint::spin_loop();
+        }
+
+        // 计时轮。
+        const TIMED_ROUNDS: u64 = 5;
+        let mut degraded = done.load(Ordering::Acquire) < expected_aps;
+        let t0 = rdtsc();
+        for r in 2..2 + TIMED_ROUNDS as usize {
+            round.store(r, Ordering::SeqCst);
+            unsafe { fill_rows(fb_base, stride_b, fw, by0, by1, 0x0044_5566_0044_5566) };
+            let target = r * expected_aps;
+            let deadline = rdtsc() + 5 * tps.max(1);
+            while done.load(Ordering::Acquire) < target && rdtsc() < deadline {
+                core::hint::spin_loop();
+            }
+            if done.load(Ordering::Acquire) < target {
+                degraded = true;
+                break;
+            }
         }
         let dt_multi = rdtsc() - t0;
         let finished = done.load(Ordering::Acquire);
-        let multi_ms = dt_multi as f64 * 1000.0 / tps as f64;
+        round.store(FILL_QUIT, Ordering::SeqCst);
+        // done 是热身+计时轮累计值，减掉热身轮再显示。
+        let timed_target = expected_aps * TIMED_ROUNDS as usize;
+        let timed_done = finished.saturating_sub(expected_aps).min(timed_target);
+        let multi_ms = dt_multi as f64 * 1000.0 / (TIMED_ROUNDS as f64 * tps as f64);
         let scaling = single_ms / multi_ms.max(0.001);
         tline!(
             report,
@@ -258,16 +282,13 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
             "fb fill {} cores: {:.2} ms ({:.1} MB/s, x{:.2} speedup, eff {:.0}%, ap {}/{}){}",
             n_cores,
             multi_ms,
-            fb_bytes as f64 * tps as f64 / (dt_multi as f64 * 1024.0 * 1024.0),
+            fb_bytes as f64 * tps as f64
+                / (dt_multi as f64 / TIMED_ROUNDS as f64 * 1024.0 * 1024.0),
             scaling,
             scaling / n_cores as f64 * 100.0,
-            finished,
-            n_cores - 1,
-            if finished < n_cores - 1 {
-                " TIMEOUT?"
-            } else {
-                ""
-            }
+            timed_done,
+            timed_target,
+            if degraded { " TIMEOUT?" } else { "" }
         );
     }
 
@@ -350,25 +371,42 @@ struct FillCtx<'a> {
     width: usize,
     height: usize,
     n: usize,
+    round: &'a AtomicUsize,
     done: &'a AtomicUsize,
 }
 
-extern "efiapi" fn ap_fill_task(arg: *mut c_void) {
+/// 退出哨兵：BSP 写 round=QUIT 后 AP 跳出常驻循环，procedure 返回。
+const FILL_QUIT: usize = usize::MAX;
+
+/// AP 常驻工作循环：等新一轮轮次号，填自己行区，打卡。BSP 发 QUIT 后退出。
+extern "efiapi" fn ap_fill_loop(arg: *mut c_void) {
     if arg.is_null() {
         return;
     }
     let ctx = unsafe { &*(arg as *const FillCtx) };
     let id = ctx.mp.who_am_i().unwrap_or(usize::MAX) % ctx.n.max(1);
     let (y0, y1) = rows_for(id, ctx.n, ctx.height);
-    unsafe {
-        fill_rows(
-            ctx.fb_base,
-            ctx.stride_bytes,
-            ctx.width,
-            y0,
-            y1,
-            0x0044_5566_0044_5566,
-        )
-    };
-    ctx.done.fetch_add(1, Ordering::SeqCst);
+    let mut my_round = 0usize;
+    loop {
+        let g = ctx.round.load(Ordering::Acquire);
+        if g == FILL_QUIT {
+            break;
+        }
+        if g == my_round {
+            core::hint::spin_loop();
+            continue;
+        }
+        my_round = g;
+        unsafe {
+            fill_rows(
+                ctx.fb_base,
+                ctx.stride_bytes,
+                ctx.width,
+                y0,
+                y1,
+                0x0044_5566_0044_5566,
+            )
+        };
+        ctx.done.fetch_add(1, Ordering::SeqCst);
+    }
 }
