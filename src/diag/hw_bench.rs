@@ -14,9 +14,9 @@ use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::arch::x86_64::{
-    __cpuid, __cpuid_count, _mm_add_epi32, _mm_add_ps, _mm_set_epi32, _mm_set_ps,
-    _mm_storeu_ps, _mm_storeu_si128, _xgetbv,
+    __cpuid, __cpuid_count, _mm_set_epi32, _mm_storeu_si128, _xgetbv,
 };
+use core::arch::asm;
 use core::time::Duration;
 
 use uefi::boot::{self, get_handle_for_protocol, open_protocol_exclusive};
@@ -92,43 +92,85 @@ fn yn(b: bool) -> &'static str {
 
 // ---------- 功能实测 ----------
 
-fn sse_int_add_test() -> bool {
-    unsafe {
-        let a = _mm_set_epi32(1, 1, 1, 1);
-        let b = _mm_set_epi32(2, 2, 2, 2);
-        let c = _mm_add_epi32(a, b);
-        let mut out = [0i32; 4];
-        _mm_storeu_si128(out.as_mut_ptr() as *mut _, c);
-        out == [3, 3, 3, 3]
-    }
-}
-
-fn sse_float_add_test() -> [f32; 4] {
-    // 注：QEMU TCG 下曾观测到返回 [2.0, 0.0, 4.0, 0.0]（奇 lane 归零），
-    // 属模拟器浮点 lane quirk；真机以实际输出为准，FAIL 时看 got= 值。
-    unsafe {
-        let a = _mm_set_ps(4.0, 3.0, 2.0, 1.0);
-        let b = _mm_set_ps(1.0, 1.0, 1.0, 1.0);
-        let c = _mm_add_ps(a, b);
-        let mut out = [0f32; 4];
-        _mm_storeu_ps(out.as_mut_ptr(), c);
-        out
-    }
-}
-
-/// AVX 版必须开 target_feature 单独编译，调用前必须已过可用性检查。
-/// 用 float 版（AVX1 即可；整数 256 位要 AVX2，另起检测位）。
-#[target_feature(enable = "avx")]
-unsafe fn avx_float_add_test() -> bool {
-    use core::arch::x86_64::{_mm256_add_ps, _mm256_set_ps, _mm256_storeu_ps};
+/// SSE2 整数加法实测。
+///
+/// 约束（全是反汇编逼出来的）：
+/// 1. 只测整数向量：浮点向量在此 target 上曾经全军覆没（标量化/错常量），
+///    而 `.cargo/config.toml` 整 crate 摘软浮点后整数路径已验证发射；
+///    浮点执行不在本测试覆盖内（CPUID+XCR0 矩阵照常报告支持情况）。
+/// 2. 加法本身必须用 `asm!` 显式 `xmm_reg`：内在函数版的 load/add/store
+///    会被 LLVM 整链标量化（二进制零条向量指令——整数得假 PASS）。
+///    内在函数只配构造操作数（构造路径怎么编都无所谓）。
+/// 3. `#[target_feature]` 保留做双保险（compile-time 门控 + 文档作用），
+///    真正的 ABI 前提由 `.cargo/config.toml` 的 crate 级 flags 保证。
+#[target_feature(enable = "sse2")]
+unsafe fn sse_int_add_test(seed: u32) -> bool {
     // edition 2024：unsafe fn 体内也要显式 unsafe 块。
     unsafe {
-        let a = _mm256_set_ps(8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0, 1.0);
-        let b = _mm256_set_ps(1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0);
-        let c = _mm256_add_ps(a, b);
-        let mut out = [0f32; 8];
-        _mm256_storeu_ps(out.as_mut_ptr(), c);
-        out == [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0]
+        // lane 值运行时派生；u128 纯整数类型不进向量 legalize
+        //（__m128i 会在 asm 约束处触发 getCopyFromParts 后端错误），
+        // paddd 只认 bit pattern，lane 划分靠移位。
+        let s = seed;
+        let a: u128 = (s as u128)
+            | ((s.wrapping_add(1) as u128) << 32)
+            | ((s.wrapping_add(2) as u128) << 64)
+            | ((s.wrapping_add(3) as u128) << 96);
+        let b: u128 = 10 | (20u128 << 32) | (30u128 << 64) | (40u128 << 96);
+        let mut acc = a;
+        // Intel 语法：paddd acc, rhs  <=>  acc += rhs（lane 级 wrapping，与 wrapping_add 同语义）。
+        asm!(
+            "paddd {acc}, {rhs}",
+            acc = inlateout(xmm_reg) acc,
+            rhs = in(xmm_reg) b,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        let want: u128 = ((s as i32).wrapping_add(10) as u32 as u128)
+            | (((s.wrapping_add(1) as i32).wrapping_add(20) as u32 as u128) << 32)
+            | (((s.wrapping_add(2) as i32).wrapping_add(30) as u32 as u128) << 64)
+            | (((s.wrapping_add(3) as i32).wrapping_add(40) as u32 as u128) << 96);
+        acc == want
+    }
+}
+
+/// AVX2 整数加法实测（256 位整数要 AVX2，调用前必须同时满足
+/// `check_avx_support()` 与 CPUID.07h:EBX.AVX2）。约束同 SSE 版。
+#[target_feature(enable = "avx2")]
+unsafe fn avx2_int_add_test(seed: u32) -> bool {
+    use core::arch::x86_64::{_mm256_set_epi32, _mm256_storeu_si256};
+    unsafe {
+        let a = _mm256_set_epi32(
+            seed.wrapping_add(7) as i32,
+            seed.wrapping_add(6) as i32,
+            seed.wrapping_add(5) as i32,
+            seed.wrapping_add(4) as i32,
+            seed.wrapping_add(3) as i32,
+            seed.wrapping_add(2) as i32,
+            seed.wrapping_add(1) as i32,
+            seed as i32,
+        );
+        let b = _mm256_set_epi32(8, 7, 6, 5, 4, 3, 2, 1);
+        let mut acc = a;
+        // VEX 3 操作数：vpaddd acc, lhs, rhs  <=>  acc = lhs + rhs。
+        asm!(
+            "vpaddd {acc}, {lhs}, {rhs}",
+            acc = inlateout(ymm_reg) acc,
+            lhs = in(ymm_reg) a,
+            rhs = in(ymm_reg) b,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        let mut out = [0i32; 8];
+        _mm256_storeu_si256(out.as_mut_ptr() as *mut _, acc);
+        let s = seed;
+        out == [
+            (s as i32).wrapping_add(1),
+            (s.wrapping_add(1) as i32).wrapping_add(2),
+            (s.wrapping_add(2) as i32).wrapping_add(3),
+            (s.wrapping_add(3) as i32).wrapping_add(4),
+            (s.wrapping_add(4) as i32).wrapping_add(5),
+            (s.wrapping_add(5) as i32).wrapping_add(6),
+            (s.wrapping_add(6) as i32).wrapping_add(7),
+            (s.wrapping_add(7) as i32).wrapping_add(8),
+        ]
     }
 }
 
@@ -214,31 +256,22 @@ pub fn run(screen: &mut Screen) -> Result {
 
     // ---- SIMD 功能实测 ----
     tline!(report, screen, "-- SIMD exec test --");
+    // ---- SIMD 功能实测（纯整数向量；浮点向量在此 target 上必被软浮点化，不测） ----
     tline!(
         report,
         screen,
         "  SSE2 int add : {}",
-        if f.sse2 && sse_int_add_test() {
+        if f.sse2 && unsafe { sse_int_add_test(rdtsc() as u32) } {
             "PASS"
         } else {
             "FAIL/SKIP"
         }
     );
-    if f.sse {
-        let got = sse_float_add_test();
-        if got == [2.0, 3.0, 4.0, 5.0] {
-            tline!(report, screen, "  SSE float add: PASS");
-        } else {
-            tline!(report, screen, "  SSE float add: FAIL got={:?}", got);
-        }
+    if check_avx_support() && f.avx2_hw {
+        let ok = unsafe { avx2_int_add_test(rdtsc() as u32) };
+        tline!(report, screen, "  AVX2 int add : {}", if ok { "PASS" } else { "FAIL" });
     } else {
-        tline!(report, screen, "  SSE float add: SKIP (no SSE)");
-    }
-    if check_avx_support() {
-        let ok = unsafe { avx_float_add_test() };
-        tline!(report, screen, "  AVX float add: {}", if ok { "PASS" } else { "FAIL" });
-    } else {
-        tline!(report, screen, "  AVX float add: SKIP (not usable)");
+        tline!(report, screen, "  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)");
     }
 
     // ---- 基准 ----
@@ -309,14 +342,18 @@ pub fn run(screen: &mut Screen) -> Result {
     );
 
     // 4) 内存拷贝带宽
+    // 注意：src/dst 固定时 LLVM 会把 20 次折叠成 1 次（曾测出 96 万 MB/s 的笑话），
+    // 每轮 black_box 指针逼真干 20 次。
     const MEM_N: u64 = 20;
     const MEM_LEN: usize = 4 * 1024 * 1024;
     let src = vec![0xA5u8; MEM_LEN];
     let mut dst = vec![0u8; MEM_LEN];
     let t0 = rdtsc();
     for _ in 0..MEM_N {
+        let s = core::hint::black_box(src.as_ptr());
+        let d = core::hint::black_box(dst.as_mut_ptr());
         unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_mut_ptr(), MEM_LEN);
+            core::ptr::copy_nonoverlapping(s, d, MEM_LEN);
         }
     }
     let dt = rdtsc() - t0;

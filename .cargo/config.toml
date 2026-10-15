@@ -1,0 +1,13 @@
+# x86-64 长模式 guaranteed SSE/SSE2（固件跑的就是 64 位代码，EDK2 自己也依赖它）。
+#
+# 背景（2026-10-15 反汇编实锤）：uefi target 基线自带 `+soft-float`，
+# 且函数级 `#[target_feature]` 摘不掉它——内在函数会被标量化（整数得假 PASS、
+# 浮点得错常量），`asm!` 显式 xmm_reg 直接后端 ICE。零散加 `+sse` 保持
+# soft-float 的混搭也会 ICE。唯一自洽的组合就是这里：整 crate 摘软浮点、
+# 开 sse/sse2（x86-64 psABI 本来就要求这两项）。
+# AVX/AVX2 仍只允许 #[target_feature] 函数内、运行时 CPUID+XCR0 门控后调用。
+[build]
+target = "x86_64-unknown-uefi"
+
+[target.x86_64-unknown-uefi]
+rustflags = ["-C", "target-feature=-soft-float,+sse,+sse2"]

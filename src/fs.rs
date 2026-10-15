@@ -49,8 +49,10 @@ impl Fs {
 
     /// 一次性写文件。UEFI 没有 truncate 语义：已存在就先删再建，
     /// 保证旧长文件残留字节不会污染本次内容。
+    /// 注意：必须用可写模式打开才能 Delete，读模式句柄删会被固件拒绝
+    /// （失败静默则旧文件残留，曾实测出文件尾多一行旧内容）。
     pub fn write_file(&mut self, path: &CStr16, data: &[u8]) -> Result {
-        if let Ok(old) = self.open_file(path) {
+        if let Ok(old) = self.open_file_attr(path, FileMode::ReadWrite, FileAttribute::empty()) {
             let _ = old.delete();
         }
         let mut file = self.create_file(path)?;
