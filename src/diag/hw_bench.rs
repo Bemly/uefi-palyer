@@ -19,7 +19,6 @@ use core::arch::asm;
 use core::time::Duration;
 
 use uefi::boot::{self, get_handle_for_protocol, open_protocol_exclusive};
-use uefi::proto::console::gop::BltPixel;
 use uefi::proto::pi::mp::MpServices;
 
 use crate::diag::avx_checker::check_avx_support;
@@ -276,70 +275,10 @@ pub fn run(screen: &mut Screen) -> Result {
     let tps = calibrate_ticks_per_sec();
     tline!(report, screen, "tsc: {} ticks/sec", tps);
 
-    let (w, h) = screen.get_gop().current_mode_info().resolution();
-    let stride = screen.get_gop().current_mode_info().stride();
-    tline!(report, screen, "gop: {}x{} stride {}", w, h, stride);
+    // ---- GOP 压测（单/多核、带宽、瓶颈归因，见 gop_bench） ----
+    crate::diag::gop_bench::run_section(&mut report, screen, tps)?;
 
-    // 1) 整屏 VideoFill 刷新
-    const FILL_N: u64 = 10;
-    let t0 = rdtsc();
-    for _ in 0..FILL_N {
-        screen.clear()?;
-    }
-    let dt = rdtsc() - t0;
-    tline!(
-        report,
-        screen,
-        "screen VideoFill: {:.1} fps ({:.2} ms/frame)",
-        (FILL_N as f64 * tps as f64) / dt as f64,
-        dt as f64 * 1000.0 / (FILL_N as f64 * tps as f64)
-    );
-
-    // 2) 整屏 BufferToVideo
-    let pixels = vec![BltPixel::new(0x11, 0x22, 0x33); w * h];
-    const BLT_N: u64 = 10;
-    let t0 = rdtsc();
-    for _ in 0..BLT_N {
-        screen.draw_image(w as u32, h as u32, &pixels)?;
-    }
-    let dt = rdtsc() - t0;
-    let bytes = BLT_N * (w * h * 4) as u64;
-    tline!(
-        report,
-        screen,
-        "gop BufferToVideo: {:.1} fps, {:.1} MB/s",
-        (BLT_N as f64 * tps as f64) / dt as f64,
-        bytes as f64 * tps as f64 / (dt as f64 * 1024.0 * 1024.0)
-    );
-    drop(pixels);
-
-    // 3) framebuffer 裸写带宽
-    let fb_bytes = w * h * 4;
-    const FB_N: u64 = 10;
-    let t0 = rdtsc();
-    {
-        let mut fb = screen.get_gop().frame_buffer();
-        let dst = fb.as_mut_ptr();
-        for _ in 0..FB_N {
-            unsafe {
-                let mut i = 0;
-                while i + 8 <= fb_bytes {
-                    (dst.add(i) as *mut u64).write_volatile(0x0011_2233_0011_2233);
-                    i += 8;
-                }
-            }
-        }
-    }
-    let dt = rdtsc() - t0;
-    let bytes = FB_N * fb_bytes as u64;
-    tline!(
-        report,
-        screen,
-        "gop direct-write: {:.1} MB/s",
-        bytes as f64 * tps as f64 / (dt as f64 * 1024.0 * 1024.0)
-    );
-
-    // 4) 内存拷贝带宽
+    // ---- 内存拷贝带宽 ----
     // 注意：src/dst 固定时 LLVM 会把 20 次折叠成 1 次（曾测出 96 万 MB/s 的笑话），
     // 每轮 black_box 指针逼真干 20 次。
     const MEM_N: u64 = 20;
@@ -364,7 +303,7 @@ pub fn run(screen: &mut Screen) -> Result {
         dst[MEM_LEN - 1]
     );
 
-    // 5) 整数流水线
+    // ---- 整数流水线 ----
     const OPS: u64 = 20_000_000;
     let mut acc: u64 = 0x1234_5678;
     let t0 = rdtsc();
