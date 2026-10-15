@@ -11,6 +11,8 @@ use crate::diag::{
     avx_checker, get_cpu_info, get_multi_monitor, get_smbios, mp_service, multi_core_draw,
     use_embedded_graphics_gop,
 };
+#[cfg(target_arch = "x86_64")]
+use crate::diag::hw_bench;
 use crate::error::Result;
 use crate::graphics::Screen;
 use crate::video::video_run;
@@ -88,6 +90,14 @@ pub const ITEMS: &[Item] = &[
         name: "AVX check",
         desc: "CPUID + XCR0 probe",
         run: Entry::Shared(avx_checker::run),
+        fatal_on_error: false,
+    },
+    #[cfg(target_arch = "x86_64")]
+    Item {
+        key: '8',
+        name: "HW bench",
+        desc: "SSE/AVX+GOP+compute, save USB",
+        run: Entry::Shared(hw_bench::run),
         fatal_on_error: false,
     },
 ];

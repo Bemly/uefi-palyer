@@ -16,3 +16,6 @@ pub mod get_smbios;
 pub mod mp_service;
 pub mod multi_core_draw;
 pub mod use_embedded_graphics_gop;
+
+#[cfg(target_arch = "x86_64")]
+pub mod hw_bench;

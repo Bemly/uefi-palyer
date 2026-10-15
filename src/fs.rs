@@ -38,6 +38,27 @@ impl Fs {
             .ok_or(NyaStatus::NotRegularFile)
     }
 
+    /// 创建（或打开已存在）可写文件。
+    #[inline]
+    pub fn create_file(&mut self, path: &CStr16) -> Result<RegularFile> {
+        self.root_dir
+            .open(path, FileMode::CreateReadWrite, FileAttribute::empty())?
+            .into_regular_file()
+            .ok_or(NyaStatus::NotRegularFile)
+    }
+
+    /// 一次性写文件。UEFI 没有 truncate 语义：已存在就先删再建，
+    /// 保证旧长文件残留字节不会污染本次内容。
+    pub fn write_file(&mut self, path: &CStr16, data: &[u8]) -> Result {
+        if let Ok(old) = self.open_file(path) {
+            let _ = old.delete();
+        }
+        let mut file = self.create_file(path)?;
+        file.write(data).map_err(|e| e.status())?;
+        file.flush()?;
+        Ok(())
+    }
+
     // 一次性读取全部内容，慎用
     pub fn read_file(&mut self, path: &CStr16) -> Result<Vec<u8>> {
         let mut file = self.open_file(path)?;
