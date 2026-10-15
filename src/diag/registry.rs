@@ -8,8 +8,8 @@
 //!   embedded-graphics 中文演示是这种形态。
 
 use crate::diag::{
-    avx_checker, get_cpu_info, get_multi_monitor, get_smbios, mp_service, multi_core_draw,
-    use_embedded_graphics_gop,
+    avx_checker, fw_collect, get_cpu_info, get_multi_monitor, get_smbios, mp_service,
+    multi_core_draw, use_embedded_graphics_gop,
 };
 #[cfg(target_arch = "x86_64")]
 use crate::diag::hw_bench;
@@ -98,6 +98,13 @@ pub const ITEMS: &[Item] = &[
         name: "HW bench",
         desc: "SSE/AVX+GOP+compute, save USB",
         run: Entry::Shared(hw_bench::run),
+        fatal_on_error: false,
+    },
+    Item {
+        key: '9',
+        name: "FW collect",
+        desc: "SMBIOS+PCI+disks, save USB",
+        run: Entry::Shared(fw_collect::run),
         fatal_on_error: false,
     },
 ];

@@ -11,11 +11,16 @@
 
 use core::time::Duration;
 
+use alloc::format;
+use alloc::string::String;
 use uefi::boot::{self, get_handle_for_protocol, open_protocol_exclusive};
+use uefi::data_types::CString16;
 use uefi::proto::console::text::{Input, Key};
 use uefi::system::with_config_table;
 use uefi::table::cfg::ConfigTableEntry as cfg;
 
+use crate::error::{NyaStatus, Result};
+use crate::fs::Fs;
 use crate::graphics::Screen;
 
 /// 双写输出：串口日志（`log`）+ 图形屏显（`Screen::draw_str`），至少一处可见。
@@ -72,6 +77,22 @@ pub fn pause_return(screen: &mut Screen) {
     screen.draw_str("-- Done. Press any key back to menu --");
     flush_keys();
     wait_key();
+}
+
+/// 存报告到启动卷根目录，文件名自动递增（`{prefix}00.TXT`、`{prefix}01.TXT`…），
+/// 连测多台机器不互相覆盖。返回屏显用的确认行。
+pub fn save_report(prefix: &str, body: &[u8]) -> Result<String> {
+    let mut fs = Fs::new()?;
+    for i in 0..100u32 {
+        let name = format!("{}{:02}.TXT", prefix, i);
+        let cstr =
+            CString16::try_from(name.as_str()).map_err(|_| NyaStatus::FromStrWithBufError)?;
+        if fs.open_file(&cstr).is_err() {
+            fs.write_file(&cstr, body)?;
+            return Ok(format!("saved: {} ({} bytes)", name, body.len()));
+        }
+    }
+    Err(NyaStatus::_Debug(String::from("too many reports on disk")))
 }
 
 /// 在当前 config table 里找 SMBIOS 入口物理地址（优先 SMBIOS3，回落 SMBIOS）。

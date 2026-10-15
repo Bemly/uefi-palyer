@@ -1,6 +1,6 @@
 //! 整机硬件测试：SIMD 支持度实测 + 屏幕/GOP/算力基准，跑完落盘。
 //!
-//! - SSE/AVX：CPUID 查位 + **真执行一条内在函数验算**（光看 CPUID 不叫测试）。
+//! - SSE/AVX：CPUID 查位 + **真执行一条向量指令验算**（光看 CPUID 不叫测试）。
 //!   AVX 执行前必须过 `check_avx_support`（硬件 + OSXSAVE + XCR0），否则 #UD。
 //! - 屏幕刷新：GOP VideoFill / BufferToVideo 整屏帧率。
 //! - GOP 速度：framebuffer 裸指针直写带宽。
@@ -14,22 +14,18 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
-use core::arch::x86_64::{
-    __cpuid, __cpuid_count, _mm_set_epi32, _mm_storeu_si128, _xgetbv,
-};
+use core::arch::x86_64::{__cpuid, __cpuid_count, _xgetbv};
 use core::arch::asm;
 use core::time::Duration;
 
 use uefi::boot::{self, get_handle_for_protocol, open_protocol_exclusive};
-use uefi::cstr16;
-use uefi::data_types::CString16;
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::pi::mp::MpServices;
 
 use crate::diag::avx_checker::check_avx_support;
+use crate::diag::common::save_report;
 use crate::emit;
-use crate::error::{NyaStatus, Result};
-use crate::fs::Fs;
+use crate::error::Result;
 use crate::graphics::Screen;
 
 /// 双记一行：屏显（+串口）与报告正文各一份。
@@ -386,22 +382,9 @@ pub fn run(screen: &mut Screen) -> Result {
     );
 
     // ---- 落盘：文件名自动递增（HWBENCH00.TXT、HWBENCH01.TXT…），
-    // 连测多台机器不互相覆盖，跑完把 U 盘上全部 HWBENCH*.TXT 拷回即可 ----
+    // 连测多台机器不互相覆盖 ----
     let body = report.join("\n") + "\n";
-    let save_msg: Result<String> = (|| {
-        let mut fs = Fs::new()?;
-        for i in 0..100u32 {
-            let name = format!("HWBENCH{:02}.TXT", i);
-            let cstr = CString16::try_from(name.as_str())
-                .map_err(|_| NyaStatus::FromStrWithBufError)?;
-            if fs.open_file(&cstr).is_err() {
-                fs.write_file(&cstr, body.as_bytes())?;
-                return Ok(format!("saved: {} ({} bytes)", name, body.len()));
-            }
-        }
-        Err(NyaStatus::_Debug(String::from("too many reports on disk")))
-    })();
-    match save_msg {
+    match save_report("HWBENCH", body.as_bytes()) {
         Ok(s) => tline!(report, screen, "{}", s),
         Err(e) => tline!(report, screen, "SAVE FAILED: {:?}", e),
     }
