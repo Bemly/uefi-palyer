@@ -5,7 +5,8 @@
 //! - 屏幕刷新：GOP VideoFill / BufferToVideo 整屏帧率。
 //! - GOP 速度：framebuffer 裸指针直写带宽。
 //! - 算力：memcpy 带宽 + 整数流水线吞吐。
-//! - 落盘：启动卷根目录写 `HWBENCH.TXT`（从 U 盘启动时就是 U 盘）。
+//! - 落盘：启动卷根目录写 `HWBENCHnn.TXT`（从 U 盘启动时就是 U 盘），
+//!   文件名自动递增，连测多台机器不互相覆盖。
 //!
 //! x86_64 only：CPUID / RDTSC / SSE-AVX 内在函数。
 
@@ -21,12 +22,13 @@ use core::time::Duration;
 
 use uefi::boot::{self, get_handle_for_protocol, open_protocol_exclusive};
 use uefi::cstr16;
+use uefi::data_types::CString16;
 use uefi::proto::console::gop::BltPixel;
 use uefi::proto::pi::mp::MpServices;
 
 use crate::diag::avx_checker::check_avx_support;
 use crate::emit;
-use crate::error::Result;
+use crate::error::{NyaStatus, Result};
 use crate::fs::Fs;
 use crate::graphics::Screen;
 
@@ -383,10 +385,24 @@ pub fn run(screen: &mut Screen) -> Result {
         acc & 0xFFFF
     );
 
-    // ---- 落盘 ----
+    // ---- 落盘：文件名自动递增（HWBENCH00.TXT、HWBENCH01.TXT…），
+    // 连测多台机器不互相覆盖，跑完把 U 盘上全部 HWBENCH*.TXT 拷回即可 ----
     let body = report.join("\n") + "\n";
-    match Fs::new().and_then(|mut fs| fs.write_file(cstr16!("HWBENCH.TXT"), body.as_bytes())) {
-        Ok(()) => tline!(report, screen, "saved: HWBENCH.TXT ({} bytes)", body.len()),
+    let save_msg: Result<String> = (|| {
+        let mut fs = Fs::new()?;
+        for i in 0..100u32 {
+            let name = format!("HWBENCH{:02}.TXT", i);
+            let cstr = CString16::try_from(name.as_str())
+                .map_err(|_| NyaStatus::FromStrWithBufError)?;
+            if fs.open_file(&cstr).is_err() {
+                fs.write_file(&cstr, body.as_bytes())?;
+                return Ok(format!("saved: {} ({} bytes)", name, body.len()));
+            }
+        }
+        Err(NyaStatus::_Debug(String::from("too many reports on disk")))
+    })();
+    match save_msg {
+        Ok(s) => tline!(report, screen, "{}", s),
         Err(e) => tline!(report, screen, "SAVE FAILED: {:?}", e),
     }
 
