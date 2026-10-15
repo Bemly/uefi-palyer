@@ -67,7 +67,8 @@ pub fn run_menu(mut screen: Screen) -> ! {
                         // 提示行打在底部。
                         drop(screen);
                         let result = f();
-                        screen = Screen::new().expect("Failed to re-create screen");
+                        screen =
+                            Screen::reacquire().expect("Failed to re-create screen");
                         screen.cursor_to_bottom();
                         match result {
                             Ok(()) => pause_return(&mut screen),

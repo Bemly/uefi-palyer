@@ -14,6 +14,24 @@ impl Screen {
     pub fn new() -> Result<Self> {
         let handle = get_handle_for_protocol::<GraphicsOutput>()?;
         let mut gop = open_protocol_exclusive::<GraphicsOutput>(handle)?;
+        // 首选 1080p：视频就是按 1920x1080 准备的，且大窗口更易读。
+        // 固件没有该模式时保持默认（尽力而为，不报错）。
+        let mode_1080p = gop
+            .modes()
+            .find(|m| m.info().resolution() == (1920, 1080));
+        if let Some(mode) = mode_1080p {
+            if let Err(e) = gop.set_mode(&mode) {
+                log::warn!("set 1080p GOP mode failed: {:?}", e);
+            }
+        }
+        Ok(Self { gop, stdout: 0 })
+    }
+
+    /// 独占 GOP 的 demo 跑完后重建：保持当前模式、不切分辨率，
+    /// 保住 demo 画面（`new()` 会尝试切 1080p，不适合这里）。
+    pub fn reacquire() -> Result<Self> {
+        let handle = get_handle_for_protocol::<GraphicsOutput>()?;
+        let gop = open_protocol_exclusive::<GraphicsOutput>(handle)?;
         Ok(Self { gop, stdout: 0 })
     }
 
