@@ -19,6 +19,9 @@ impl Screen {
 
     pub fn get_gop(&mut self) -> &mut ScopedProtocol<GraphicsOutput> { &mut self.gop }
 
+    /// 把文本光标复位到左上角（配合 `clear()` 在菜单/报错切屏时用）。
+    pub fn reset_cursor(&mut self) { self.stdout = 0; }
+
     pub fn draw_image(&mut self, width: u32, height: u32, pixels: &[BltPixel]) -> Result {
         // 我不知道为什么封装成这样了，但是它能工作！
         // 默认blt输出uefi::result::Result，这里?拆包然后Ok封装为crate::error::Result

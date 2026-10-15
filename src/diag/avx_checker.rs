@@ -1,5 +1,19 @@
 use core::arch::x86_64::{__cpuid, _xgetbv};
 
+use crate::emit;
+use crate::error::Result;
+use crate::graphics::Screen;
+
+pub fn run(screen: &mut Screen) -> Result {
+    if check_avx_support() {
+        // 此时可以安全使用 AVX 指令
+        emit!(screen, "AVX is enabled and safe to use.");
+    } else {
+        emit!(screen, "AVX is NOT available. Falling back to SSE/u64.");
+    }
+    Ok(())
+}
+
 pub fn check_avx_support() -> bool {
     unsafe {
         // 1. 检查 CPUID.01h:ECX.AVX[bit 28] 和 CPUID.01h:ECX.OSXSAVE[bit 27]
@@ -25,15 +39,5 @@ pub fn check_avx_support() -> bool {
         let avx_state_mask = 1 << 2;
 
         (xcr0 & avx_state_mask) != 0
-    }
-}
-
-// 在 main 中调用
-pub fn print_avx_status() {
-    if check_avx_support() {
-        // 此时可以安全使用 AVX 指令
-        log::info!("AVX is enabled and safe to use.");
-    } else {
-        log::warn!("AVX is NOT available. Falling back to SSE/u64.");
     }
 }

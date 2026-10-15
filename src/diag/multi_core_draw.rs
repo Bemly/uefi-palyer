@@ -1,12 +1,11 @@
 use core::ffi::c_void;
-use core::sync::atomic::{AtomicUsize, Ordering};
-use uefi::prelude::*;
-use core::time::Duration;
+
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive};
-use uefi::println;
 use uefi::proto::pi::mp::MpServices;
-use log::{error, info, warn};
-use uefi::proto::console::gop::{GraphicsOutput, PixelFormat, BltPixel};
+
+use crate::emit;
+use crate::error::Result;
+use crate::graphics::Screen;
 
 #[repr(C)]
 struct MpDrawContext<'a> {
@@ -18,34 +17,42 @@ struct MpDrawContext<'a> {
     num_total_procs: usize,
 }
 
+// 上下文经 *mut c_void 裸指针传给 AP，不经过 Rust 跨线程类型检查；
+// 各核心只写自己独占的行区间，调用方保证不重叠。
+
 #[inline(always)]
 unsafe fn u64_fast_copy_color(dst: *mut u8, len: usize, color_u64: u64) {
-    let mut i = 0;
-    // 每次填充 64 字节 (8个 u64)
-    while i + 64 <= len {
-        let ptr = dst.add(i) as *mut u64;
-        ptr.write_volatile(color_u64);
-        ptr.add(1).write_volatile(color_u64);
-        ptr.add(2).write_volatile(color_u64);
-        ptr.add(3).write_volatile(color_u64);
-        ptr.add(4).write_volatile(color_u64);
-        ptr.add(5).write_volatile(color_u64);
-        ptr.add(6).write_volatile(color_u64);
-        ptr.add(7).write_volatile(color_u64);
-        i += 64;
-    }
-    while i + 8 <= len {
-        (dst.add(i) as *mut u64).write_volatile(color_u64);
-        i += 8;
-    }
-    while i < len {
-        dst.add(i).write_volatile(color_u64 as u8);
-        i += 1;
+    // edition 2024 要求 unsafe fn 体内显式 unsafe 块。
+    unsafe {
+        let mut i = 0;
+        // 每次填充 64 字节 (8个 u64)
+        while i + 64 <= len {
+            let ptr = dst.add(i) as *mut u64;
+            ptr.write_volatile(color_u64);
+            ptr.add(1).write_volatile(color_u64);
+            ptr.add(2).write_volatile(color_u64);
+            ptr.add(3).write_volatile(color_u64);
+            ptr.add(4).write_volatile(color_u64);
+            ptr.add(5).write_volatile(color_u64);
+            ptr.add(6).write_volatile(color_u64);
+            ptr.add(7).write_volatile(color_u64);
+            i += 64;
+        }
+        while i + 8 <= len {
+            (dst.add(i) as *mut u64).write_volatile(color_u64);
+            i += 8;
+        }
+        while i < len {
+            dst.add(i).write_volatile(color_u64 as u8);
+            i += 1;
+        }
     }
 }
 
 extern "efiapi" fn ap_draw_task(arg: *mut c_void) {
-    if arg.is_null() { return; }
+    if arg.is_null() {
+        return;
+    }
     let ctx = unsafe { &*(arg as *const MpDrawContext) };
 
     // 获取当前核心索引
@@ -87,25 +94,29 @@ extern "efiapi" fn ap_draw_task(arg: *mut c_void) {
     }
 }
 
-pub fn multi_core_draw() {
-    info!("=== Starting Multi-Processor (MP) Video Copy Test ===");
+pub fn run(screen: &mut Screen) -> Result {
+    emit!(screen, "=== Starting Multi-Processor (MP) Video Copy Test ===");
 
     // 1. 获取 MP 服务
-    let mp_handle = get_handle_for_protocol::<MpServices>().unwrap();
-    let mp = open_protocol_exclusive::<MpServices>(mp_handle).unwrap();
+    let mp_handle = get_handle_for_protocol::<MpServices>()?;
+    let mp = open_protocol_exclusive::<MpServices>(mp_handle)?;
 
-    // 2. 获取 GOP 服务
-    let gop_handle = get_handle_for_protocol::<GraphicsOutput>().unwrap();
-    let mut gop = open_protocol_exclusive::<GraphicsOutput>(gop_handle).unwrap();
+    // 2. 从 Screen 借 GOP：只拷贝出裸指针/分辨率后就结束借用，
+    //    AP 与 BSP 之后只走裸指针写显存，不再经过协议（此前是自己 open GOP，
+    //    菜单化后 Screen 常驻独占，那样会失败）。
+    let (width, height, stride, fb_base) = {
+        let gop = screen.get_gop();
+        let mode_info = gop.current_mode_info();
+        let (w, h) = mode_info.resolution();
+        let s = mode_info.stride();
+        let mut fb = gop.frame_buffer();
+        (w, h, s, fb.as_mut_ptr())
+    };
 
-    let mode_info = gop.current_mode_info();
-    let (width, height) = mode_info.resolution();
-    let stride = mode_info.stride();
-    let mut fb = gop.frame_buffer();
-    let fb_base = fb.as_mut_ptr();
-
-    let num_proc = mp.get_number_of_processors().unwrap();
+    let num_proc = mp.get_number_of_processors()?;
     let total_cores = num_proc.enabled;
+
+    emit!(screen, "Enabled cores: {}", total_cores);
 
     let ctx = MpDrawContext {
         mp: &mp,
@@ -121,21 +132,13 @@ pub fn multi_core_draw() {
     if total_cores > 1 {
         // 启动除 BSP 以外的所有 AP
         // uefi-rs 的 startup_all_aps 在这里会阻塞直到 AP 运行结束
-        if let Err(e) = mp.startup_all_aps(
-            false,
-            ap_draw_task,
-            arg_ptr,
-            None,
-            None
-        ) {
-            error!("Failed to start APs: {:?}", e);
-        }
+        mp.startup_all_aps(false, ap_draw_task, arg_ptr, None, None)
+            .map_err(|e| e.status())?;
     }
 
     // BSP 亲自处理它自己的那一份区域
     ap_draw_task(arg_ptr);
 
-    info!("All cores finished drawing.");
+    emit!(screen, "All cores finished drawing.");
+    Ok(())
 }
-
-

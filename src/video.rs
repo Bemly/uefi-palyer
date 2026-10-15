@@ -5,15 +5,15 @@ use core::ffi::c_void;
 use core::sync::atomic::{AtomicUsize, Ordering};
 use core::time::Duration;
 use uefi::boot::{create_event, get_handle_for_protocol, open_protocol_exclusive, set_watchdog_timer, EventType, Tpl};
-use uefi::{boot, cstr16, println, CStr16, Status};
-use uefi::proto::console::gop::{BltPixel, GraphicsOutput};
+use uefi::{boot, cstr16, CStr16, Status};
+use uefi::proto::console::gop::BltPixel;
 use uefi::proto::media::file::{File, FileInfo, RegularFile};
 use uefi::proto::pi::mp::MpServices;
 use crate::fs::Fs;
 use crate::graphics::Screen;
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
-use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
-use crate::error::{handle_fatal, NyaStatus, Result};
+use crate::video::decoder::VideoMemory;
+use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 
 pub mod buffer;
@@ -28,27 +28,10 @@ pub fn video_run(screen: &mut Screen) -> Result {
 
     const WIDTH: usize = 1920;
     const HEIGHT: usize = 1080;
-    const SIZE: usize = WIDTH * HEIGHT;
 
     let mut fs = Fs::new()?;
     let mut file = fs.open_file(cstr16!("1080p\\video.qois"))?;
-    // let mut qoi = QoiFrameBuffer::new(SIZE);
-    // let mut raw = RawFrameBuffer::new(SIZE);
-    // let mut blt = BltFrameBuffer::new(SIZE);
-    // let mut video = VideoMemory::new(file)?;
-    // let mut video_raw = VideoMemoryRaw::new(file)?;
-    // screen.parallel_video_draw_ultra(&mut video_raw, WIDTH, HEIGHT)?;
-    // screen.draw_u64_optimized_loop(&mut video_raw, WIDTH, HEIGHT); // SUPER UNSAFE!!
     mp_draw(screen, &mut file, WIDTH, HEIGHT)?;
-
-    // loop {
-    //     draw(&mut fs, &mut file, screen, &mut qoi, &mut raw, &mut blt)?;
-    //     draw_all_mem(&mut video, screen, &mut qoi, &mut raw, &mut blt)?;
-    //     draw_all_mem_zero_copy(&mut video, screen, &mut qoi, &mut blt)?;  // UNSAFE!!
-    //     screen.draw_all_mem_raw_zero_copy(&mut video_raw, WIDTH, HEIGHT); // UNSAFE!!
-    //     screen.draw_fast_direct_copy(&mut video_raw, WIDTH, HEIGHT);      // UNSAFE!!
-    //     boot::stall(Duration::from_millis(1000 / 90));
-    // }
 
     Ok(())
 }

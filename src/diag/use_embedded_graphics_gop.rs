@@ -6,21 +6,35 @@ use embedded_graphics::text::Text;
 use embedded_graphics_gop::BltDrawTarget;
 use u8g2_fonts::fonts::u8g2_font_boutique_bitmap_7x7_t_chinese3;
 use u8g2_fonts::U8g2TextStyle;
-use uefi::{prelude::*, proto::console::gop::GraphicsOutput};
-pub fn use_embedded_graphics_gop() {
+use uefi::prelude::*;
+use uefi::proto::console::gop::GraphicsOutput;
+
+use crate::error::{NyaStatus, Result};
+
+/// 特例：需要自己独占 GOP（含强制切 800x600），所以签名是 `run() -> Result`，
+/// 由菜单先 `drop(Screen)` 再调用，跑完重建 `Screen`。见 [`crate::diag::registry::Entry`]。
+pub fn run() -> Result {
     // Get the first available handle for the GOP.
-    let handle = boot::get_handle_for_protocol::<GraphicsOutput>().unwrap();
+    let handle = boot::get_handle_for_protocol::<GraphicsOutput>()?;
     // Open the protocol in exclusive mode (exclusive mode is for applications, other modes are
     // intended for drivers)
-    let mut protocol = boot::open_protocol_exclusive::<GraphicsOutput>(handle).unwrap();
+    let mut protocol = boot::open_protocol_exclusive::<GraphicsOutput>(handle)?;
     // Configure protocol here if desired, for example
-    let mode = protocol.modes().find(|m| m.info().resolution() == (800, 600)).unwrap();
-    protocol.set_mode(&mode).unwrap();
+    let mode = protocol
+        .modes()
+        .find(|m| m.info().resolution() == (800, 600))
+        .ok_or(NyaStatus::_Debug(alloc::string::String::from(
+            "800x600 GOP mode not found",
+        )))?;
+    protocol.set_mode(&mode)?;
 
     // Create the draw target utilizing the configured protocol.
-    let mut target = BltDrawTarget::new(&mut protocol).unwrap();
+    let mut target =
+        BltDrawTarget::new(&mut protocol).map_err(|e| NyaStatus::_Debug(alloc::format!("{:?}", e)))?;
     // Make it double-buffered
-    target.double_buffer(false).unwrap();
+    target
+        .double_buffer(false)
+        .map_err(|e| NyaStatus::_Debug(alloc::format!("{:?}", e)))?;
 
     // ...draw on it...
     Text::new("ｱｲｳｴｵ, ASCII_JP
@@ -37,13 +51,16 @@ pub fn use_embedded_graphics_gop() {
     Dx   ﾐ   ﾑ   ﾒ   ﾓ   ﾔ   ﾕ   ﾖ   ﾗ   ﾘ   ﾙ   ﾚ   ﾛ   ﾜ   ﾝ   ﾞ   ﾟ  ",
         Point::new(0,15),
         MonoTextStyle::new(&FONT_10X20, Rgb888::WHITE)
-    ).draw(&mut target).unwrap();
+    ).draw(&mut target).map_err(|e| NyaStatus::_Debug(alloc::format!("{:?}", e)))?;
 
     Text::new("何意味", Point::new(5,30),
               U8g2TextStyle::new(u8g2_font_boutique_bitmap_7x7_t_chinese3, Rgb888::WHITE)
-    ).draw(&mut target).unwrap();
-
+    ).draw(&mut target).map_err(|e| NyaStatus::_Debug(alloc::format!("{:?}", e)))?;
 
     // Transfer changes to the framebuffer
-    target.commit().unwrap();
+    target
+        .commit()
+        .map_err(|e| NyaStatus::_Debug(alloc::format!("{:?}", e)))?;
+
+    Ok(())
 }

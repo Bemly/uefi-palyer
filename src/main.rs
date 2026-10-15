@@ -3,26 +3,23 @@
 
 extern crate alloc;
 
+mod diag;
+mod error;
 mod fs;
 mod graphics;
-mod error;
+mod menu;
 mod video;
-mod test;
 
 use uefi::prelude::*;
-use core::time::Duration;
-use crate::error::handle_fatal;
+
 use crate::graphics::Screen;
-use crate::video::video_run;
+use crate::menu::run_menu;
 
 #[entry]
 fn main() -> Status {
     uefi::helpers::init().expect("Failed to init UEFI");
 
-
-    let mut screen = Screen::new().expect("Failed to create screen");
-    video_run(&mut screen).unwrap_or_else(|e| handle_fatal(e, &mut screen));
-
-    boot::stall(Duration::from_mins(2));
-    Status::SUCCESS
+    let screen = Screen::new().expect("Failed to create screen");
+    // 默认停留等待：由菜单分发播放视频或各诊断项，不再直进 video_run。
+    run_menu(screen);
 }
