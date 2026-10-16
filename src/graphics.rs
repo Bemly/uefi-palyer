@@ -1,6 +1,8 @@
+use alloc::vec;
 use uefi::boot::{get_handle_for_protocol, open_protocol_exclusive, ScopedProtocol};
 use uefi::proto::console::gop::{BltOp, BltPixel, BltRegion, GraphicsOutput, Mode};
 use uefi::proto::pi::mp::MpServices;
+use crate::config::{self, RenderMode};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 use crate::video::decoder::VideoMemoryRaw;
@@ -252,6 +254,96 @@ impl Screen {
         Ok(())
     }
 
+    // ---------- 渲染路径矩阵（配置文件驱动） ----------
+
+    /// 统一上屏入口：按 `\palyer.toml` 的 `render.mode` 走 CPU 直写或 GOP Blt。
+    pub fn upload_frame(&mut self, width: usize, height: usize, pixels: &[BltPixel]) -> Result {
+        match config::effective_render() {
+            RenderMode::Blt => self.upload_blt(width, height, pixels),
+            _ => self.upload_direct(width, height, pixels),
+        }
+    }
+
+    /// 走 GOP Blt 引擎（`BufferToVideo`）。注意：只有它是「内存帧 → 屏」的语义。
+    fn upload_blt(&mut self, width: usize, height: usize, pixels: &[BltPixel]) -> Result {
+        Ok(self.gop.blt(BltOp::BufferToVideo {
+            buffer: pixels,
+            src: BltRegion::Full,
+            dest: (0, 0),
+            dims: (width, height),
+        })?)
+    }
+
+    /// CPU 直写 framebuffer（stride 感知）。
+    fn upload_direct(&mut self, width: usize, height: usize, pixels: &[BltPixel]) -> Result {
+        let stride = self.gop.current_mode_info().stride();
+        let mut fb = self.gop.frame_buffer();
+        let dst = fb.as_mut_ptr();
+        let src = pixels.as_ptr() as *const u8;
+        unsafe {
+            if stride == width {
+                core::ptr::copy_nonoverlapping(src, dst, width * height * 4);
+            } else {
+                for y in 0..height {
+                    core::ptr::copy_nonoverlapping(
+                        src.add(y * width * 4),
+                        dst.add(y * stride * 4),
+                        width * 4,
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `render.mode = "auto"`：开机各跑 `frames` 帧，直写 vs Blt 取快的。
+    /// 会短暂刷花屏（随后菜单/播放会重画）。
+    pub fn bench_render(&mut self, frames: u32) -> RenderMode {
+        let (w, h) = self.gop.current_mode_info().resolution();
+        let (w, h) = (w as usize, h as usize);
+        let pixels = vec![BltPixel::new(0x11, 0x22, 0x33); w * h];
+        let frames = frames.max(1) as u64;
+
+        // 各热身一次
+        let _ = self.upload_direct(w, h, &pixels);
+        let _ = self.upload_blt(w, h, &pixels);
+
+        let t0 = tsc();
+        for _ in 0..frames {
+            let _ = self.upload_direct(w, h, &pixels);
+        }
+        let dt_direct = tsc().saturating_sub(t0);
+
+        let t0 = tsc();
+        for _ in 0..frames {
+            let _ = self.upload_blt(w, h, &pixels);
+        }
+        let dt_blt = tsc().saturating_sub(t0);
+
+        let chosen = if dt_blt < dt_direct { RenderMode::Blt } else { RenderMode::Direct };
+        log::info!(
+            "render auto: direct {} ticks vs blt {} ticks -> {:?}",
+            dt_direct,
+            dt_blt,
+            chosen
+        );
+        config::set_resolved_render(chosen);
+        chosen
+    }
+
+}
+
+/// 时间戳计数。非 x86_64 返回 0（auto 会退回 direct）。
+#[inline(always)]
+fn tsc() -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_rdtsc()
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        0
+    }
 }
 
 /// 极致性能的底层拷贝函数（无 self 依赖）

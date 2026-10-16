@@ -22,3 +22,5 @@ pub mod fw_collect;
 pub mod hw_bench;
 #[cfg(target_arch = "x86_64")]
 pub mod gop_bench;
+#[cfg(target_arch = "x86_64")]
+pub mod gop_simd;

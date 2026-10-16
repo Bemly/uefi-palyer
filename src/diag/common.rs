@@ -9,13 +9,14 @@
 //!   是 `Screen::draw_str` 的重复实现，已删除；
 //! - 帧内 FPS/OSD（`video.rs::draw_string_opaque`）是显存直写 HUD，不属于文本输出，不动。
 
+use core::sync::atomic::{AtomicU8, Ordering};
 use core::time::Duration;
 
 use alloc::format;
 use alloc::string::String;
-use uefi::boot::{self, get_handle_for_protocol, open_protocol_exclusive};
+use uefi::boot;
 use uefi::data_types::CString16;
-use uefi::proto::console::text::{Input, Key};
+use uefi::proto::console::text::Key;
 use uefi::system::with_config_table;
 use uefi::table::cfg::ConfigTableEntry as cfg;
 
@@ -34,42 +35,51 @@ macro_rules! emit {
     }};
 }
 
-fn key_to_char(key: Key) -> Option<char> {
+/// 把固件给的键值转成 (字符, 原始 u16)。
+///
+/// 注意：部分固件会把扫描码/高位写进 unicode_char（例如数字键给 0x8038
+/// 而不是 0x0038）。所以原始值要带出去，供诊断显示与容错比对（见 key_match）。
+fn key_to_char(key: Key) -> Option<(char, u16)> {
     match key {
-        Key::Printable(c) => char::from_u32(u16::from(c) as u32),
+        Key::Printable(c) => {
+            let raw = u16::from(c);
+            Some((char::from_u32(raw as u32).unwrap_or('\u{FFFD}'), raw))
+        }
         Key::Special(_) => None,
     }
 }
 
 /// 排空输入队列里的陈旧按键，避免菜单刚画出来就被之前的按键误触发。
+///
+/// 用系统表 ConIn（`with_stdin`）而非 `get_handle_for_protocol` 的“第一个
+/// Input 句柄”：多键盘机器上后者可能拿到非控制台句柄，读不到真实按键
+/// （此前菜单在部分真机上全线 Unknown key 的嫌疑之一）。
 pub fn flush_keys() {
-    if let Ok(handle) = get_handle_for_protocol::<Input>() {
-        if let Ok(mut input) = open_protocol_exclusive::<Input>(handle) {
-            while matches!(input.read_key(), Ok(Some(_))) {}
-        }
-    }
+    uefi::system::with_stdin(|input| {
+        while matches!(input.read_key(), Ok(Some(_))) {}
+    });
 }
 
-/// 阻塞等待一个可打印按键，返回其小写形式。
-pub fn wait_key() -> char {
-    loop {
-        if let Ok(handle) = get_handle_for_protocol::<Input>() {
-            if let Ok(mut input) = open_protocol_exclusive::<Input>(handle) {
-                // 先排空陈旧按键，再阻塞轮询。
-                while matches!(input.read_key(), Ok(Some(_))) {}
-                loop {
-                    if let Ok(Some(key)) = input.read_key() {
-                        if let Some(c) = key_to_char(key) {
-                            return c.to_ascii_lowercase();
-                        }
-                        // 功能键（方向键/Fx/ESC 等）：继续等可打印字符。
-                    }
-                    boot::stall(Duration::from_millis(50));
+/// 阻塞等待一个可打印按键，返回 (归一化小写字符, 原始 u16)。
+pub fn wait_key_ex() -> (char, u16) {
+    uefi::system::with_stdin(|input| {
+        // 先排空陈旧按键，再阻塞轮询。
+        while matches!(input.read_key(), Ok(Some(_))) {}
+        loop {
+            if let Ok(Some(key)) = input.read_key() {
+                if let Some((c, raw)) = key_to_char(key) {
+                    return (c.to_ascii_lowercase(), raw);
                 }
+                // 功能键（方向键/Fx/ESC 等）：继续等可打印字符。
             }
+            boot::stall(Duration::from_millis(50));
         }
-        boot::stall(Duration::from_millis(200));
-    }
+    })
+}
+
+/// 只要字符的调用方用这个（丢弃原始码）。
+pub fn wait_key() -> char {
+    wait_key_ex().0
 }
 
 /// 子项跑完后的统一收尾：提示 + 等任意键回菜单。
@@ -129,4 +139,102 @@ pub fn cpuid_max_basic() -> u32 {
 #[cfg(target_arch = "x86_64")]
 pub fn cpuid_max_extended() -> u32 {
     core::arch::x86_64::__cpuid(0x8000_0000).eax
+}
+
+/// 硬件是否已置 CR4.OSXSAVE（bit18）。CPUID.1:ECX.OSXSAVE 就是这个位的镜像。
+#[cfg(target_arch = "x86_64")]
+pub fn osxsave_on() -> bool {
+    let cr4: u64;
+    unsafe {
+        core::arch::asm!("mov {0}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+    }
+    cr4 & (1 << 18) != 0
+}
+
+/// 开机时（任何 enable 之前）采到的**固件原始** CR4.OSXSAVE。
+/// 0=未采集 1=off 2=on。各报告引用它，免得被工具自己后来的 enable 污染
+/// （此前菜单 8 先开、菜单 9 再读 CPUID 就报了假 YES）。
+static FIRMWARE_OSXSAVE: AtomicU8 = AtomicU8::new(0);
+
+/// 在 `main` 初始化后立即调用一次，记录固件原状态。
+pub fn capture_firmware_osxsave() {
+    #[cfg(target_arch = "x86_64")]
+    {
+        let v = if osxsave_on() { 2u8 } else { 1u8 };
+        FIRMWARE_OSXSAVE.store(v, Ordering::Relaxed);
+    }
+}
+
+/// 固件原始 OSXSAVE 状态；未采集返回 `None`。
+pub fn firmware_osxsave() -> Option<bool> {
+    match FIRMWARE_OSXSAVE.load(Ordering::Relaxed) {
+        2 => Some(true),
+        1 => Some(false),
+        _ => None,
+    }
+}
+
+/// 确保 XSAVE/AVX 已启用后再跑 AVX 系实测。
+///
+/// 背景（2026-10-16 QEMU 实锤）：OVMF/EDK2 默认**不开** CR4.OSXSAVE，
+/// 于是 CPUID.1:ECX.OSXSAVE 恒 0。按 Intel SDM，CR4.OSXSAVE=0 时执行 VEX
+/// 指令会 #UD，所以 `check_avx_support` 的门控是对的——但也意味着 AVX 全矩阵
+/// 在 QEMU 里永远 SKIP（HVF/TCG 都一样，因为这是固件策略，不是 CPU 能力）。
+///
+/// UEFI 应用运行在 CPL0，可以直接写 CR4/XCR0。本函数按需开启：
+/// 1. 硬件无 XSAVE（CPUID.1:ECX.26）→ 什么都不做，返回 `false`；
+/// 2. CR4.OSXSAVE 未置位 → 置位；
+/// 3. XCR0 缺 SSE/AVX(/AVX512) 状态位 → 补齐。
+///
+/// 返回 `true` 表示**本次由本函数开启**（固件没开、我们自己开），调用方据此
+/// 如实报告；已经开着则返回 `false`（幂等，真机上固件多半已开）。
+#[cfg(target_arch = "x86_64")]
+pub fn ensure_xsave_enabled() -> bool {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+
+    let c1 = __cpuid(1);
+    if c1.ecx & (1 << 26) == 0 {
+        return false; // 硬件无 XSAVE，开了也是白开
+    }
+    let has_avx = c1.ecx & (1 << 28) != 0;
+    let has_avx512 = cpuid_max_basic() >= 7 && (__cpuid_count(7, 0).ebx & (1 << 16)) != 0;
+
+    let mut changed = false;
+
+    // --- CR4.OSXSAVE (bit18) ---
+    let cr4: u64;
+    unsafe {
+        core::arch::asm!("mov {0}, cr4", out(reg) cr4, options(nostack, preserves_flags));
+    }
+    if cr4 & (1 << 18) == 0 {
+        unsafe {
+            core::arch::asm!("mov cr4, {0}", in(reg) cr4 | (1u64 << 18), options(nostack));
+        }
+        changed = true;
+    }
+
+    // --- XCR0：置位 OSXSAVE 后才能安全读写 ---
+    let mut lo: u32;
+    let mut hi: u32;
+    unsafe {
+        core::arch::asm!("xgetbv", in("ecx") 0u32, out("eax") lo, out("edx") hi,
+            options(nostack, preserves_flags));
+    }
+    let mut xcr0 = ((hi as u64) << 32) | lo as u64;
+    // bit1=SSE(xmm)，bit2=AVX(ymm)，bit5/6/7=AVX512(opmask/zmm)
+    let want = (1u64 << 1)
+        | if has_avx { 1u64 << 2 } else { 0 }
+        | if has_avx512 { (1 << 5) | (1 << 6) | (1 << 7) } else { 0 };
+    if xcr0 & want != want {
+        xcr0 |= want;
+        lo = xcr0 as u32;
+        hi = (xcr0 >> 32) as u32;
+        unsafe {
+            core::arch::asm!("xsetbv", in("ecx") 0u32, in("eax") lo, in("edx") hi,
+                options(nostack));
+        }
+        changed = true;
+    }
+
+    changed
 }

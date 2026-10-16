@@ -71,9 +71,9 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
     for _ in 0..BLT_N {
         screen.draw_image(w as u32, h as u32, &pixels)?;
     }
-    let dt = rdtsc() - t0;
-    let blt_fps = (BLT_N as f64 * tps as f64) / dt as f64;
-    let blt_mbs = (BLT_N * fb_bytes as u64) as f64 * tps as f64 / (dt as f64 * 1024.0 * 1024.0);
+    let dt_blt = rdtsc() - t0;
+    let blt_fps = (BLT_N as f64 * tps as f64) / dt_blt as f64;
+    let blt_mbs = (BLT_N * fb_bytes as u64) as f64 * tps as f64 / (dt_blt as f64 * 1024.0 * 1024.0);
     tline!(
         report,
         screen,
@@ -98,8 +98,8 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
             }
         }
     }
-    let dt = rdtsc() - t0;
-    let fb_mbs = (FB_N * fb_bytes as u64) as f64 * tps as f64 / (dt as f64 * 1024.0 * 1024.0);
+    let dt_fb = rdtsc() - t0;
+    let fb_mbs = (FB_N * fb_bytes as u64) as f64 * tps as f64 / (dt_fb as f64 * 1024.0 * 1024.0);
     tline!(report, screen, "gop direct-write full: {:.1} MB/s", fb_mbs);
 
     // ---- 定标：1/4 面积，分离固定开销与像素速率 ----
@@ -119,7 +119,7 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
         })?;
     }
     let dt_q = rdtsc() - t0;
-    let t_full_ms = dt as f64 * 1000.0 / (BLT_N as f64 * tps as f64);
+    let t_full_ms = dt_blt as f64 * 1000.0 / (BLT_N as f64 * tps as f64);
     let t_q_ms = dt_q as f64 * 1000.0 / (Q_N as f64 * tps as f64);
     // F = (4*Tq - Tf) / 3
     let fixed_ms = (4.0 * t_q_ms - t_full_ms) / 3.0;
@@ -610,6 +610,9 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
         rdb_mbs
     );
     drop(readback);
+
+    // ---- 全指令集像素通路（见 gop_simd）：向量/GPR/RNG 能进像素的全上显存 ----
+    crate::diag::gop_simd::run_section(report, screen, tps)?;
 
     // ---- 瓶颈归因（启发式，看数字说话） ----
     // 传输 vs 引擎：Fill 不搬数据只考引擎，BLT 要搬数据。

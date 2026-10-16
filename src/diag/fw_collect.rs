@@ -89,22 +89,24 @@ fn cpu_simd_summary(report: &mut Vec<String>, screen: &mut Screen) {
 
     let c1 = __cpuid(1);
     let avx_hw = c1.ecx & (1 << 28) != 0;
-    let osxsave = c1.ecx & (1 << 27) != 0;
     let (mut avx2_hw, mut avx512f_hw) = (false, false);
     if crate::diag::common::cpuid_max_basic() >= 7 {
         let c7 = __cpuid_count(7, 0);
         avx2_hw = c7.ebx & (1 << 5) != 0;
         avx512f_hw = c7.ebx & (1 << 16) != 0;
     }
+    // 与菜单 8 一致：固件没开 XSAVE 就开，再看可用性；报告开机采到的固件原状态。
+    crate::diag::common::ensure_xsave_enabled();
+    let fw = crate::diag::common::firmware_osxsave();
     let usable = crate::diag::avx_checker::check_avx_support();
     tline!(
         report,
         screen,
-        "cpu simd: AVX-HW {} | AVX2-HW {} | AVX512F-HW {} | OSXSAVE {} | AVX-usable {}",
+        "cpu simd: AVX-HW {} | AVX2-HW {} | AVX512F-HW {} | firmware-OSXSAVE {} | AVX-usable {}",
         yn(avx_hw),
         yn(avx2_hw),
         yn(avx512f_hw),
-        yn(osxsave),
+        match fw { Some(true) => "on", Some(false) => "off", None => "unk" },
         if usable { "YES" } else { "NO" }
     );
 }
@@ -383,7 +385,7 @@ fn block_collect(report: &mut Vec<String>, screen: &mut Screen) {
     for (i, h) in handles.iter().enumerate() {
         // 同 PCI：只读不独占。尤其不能独占自己启动盘的 BlockIO，
         // 否则后续 FS 写文件冲突（实测 INVALID_PARAMETER）。
-        let blk = match unsafe {
+        let mut blk = match unsafe {
             open_protocol::<BlockIO>(
                 OpenProtocolParams {
                     handle: *h,
@@ -399,39 +401,43 @@ fn block_collect(report: &mut Vec<String>, screen: &mut Screen) {
                 continue;
             }
         };
-        let m = blk.media();
-        if !m.is_media_present() {
+        // 先把 media 的标量拷出来：read_blocks 要 &mut blk，media 的借用得先结束。
+        let (present, bs, last_block, media_id, is_logical, is_ro, is_removable) = {
+            let m = blk.media();
+            (
+                m.is_media_present(),
+                m.block_size(),
+                m.last_block(),
+                m.media_id(),
+                m.is_logical_partition(),
+                m.is_read_only(),
+                m.is_removable_media(),
+            )
+        };
+        if !present {
             tline!(report, screen, "  [{}] no media", i);
             continue;
         }
-        let bs = m.block_size();
-        let cap = (m.last_block() as u64 + 1) * bs as u64;
-        let sig = read_part_sig(&blk, m.media_id(), bs);
+        let cap = (last_block as u64 + 1) * bs as u64;
+        let sig = read_part_sig(&mut blk, media_id, bs);
         tline!(
             report,
             screen,
             "  [{}] {} {} bs={}{}{} [{}]",
             i,
-            if m.is_logical_partition() {
-                "part"
-            } else {
-                "disk"
-            },
+            if is_logical { "part" } else { "disk" },
             human_bytes(cap),
             bs,
-            if m.is_read_only() { " ro" } else { "" },
-            if m.is_removable_media() {
-                " removable"
-            } else {
-                ""
-            },
+            if is_ro { " ro" } else { "" },
+            if is_removable { " removable" } else { "" },
             sig
         );
     }
 }
 
 /// 读 LBA0 判分区表签名：GPT / MBR / 裸盘。best-effort，读失败不报错。
-fn read_part_sig(blk: &BlockIO, media_id: u32, bs: u32) -> &'static str {
+/// 注：uefi 0.41 起 `read_blocks` 收 `&mut self`（固件会更新 media 结构）。
+fn read_part_sig(blk: &mut BlockIO, media_id: u32, bs: u32) -> &'static str {
     if !(512..=8192).contains(&bs) {
         return "bs?";
     }

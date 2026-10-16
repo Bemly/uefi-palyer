@@ -96,7 +96,7 @@ pub const ITEMS: &[Item] = &[
     Item {
         key: '8',
         name: "HW bench",
-        desc: "SSE/AVX+GOP+compute, save USB",
+        desc: "full-ISA SIMD+GOP+compute, save USB",
         run: Entry::Shared(hw_bench::run),
         fatal_on_error: false,
     },

@@ -12,7 +12,7 @@ use uefi::proto::pi::mp::MpServices;
 use crate::fs::Fs;
 use crate::graphics::Screen;
 use crate::video::buffer::{BltFrameBuffer, QoiFrameBuffer, RawFrameBuffer};
-use crate::video::decoder::VideoMemory;
+use crate::video::decoder::{VideoMemory, VideoMemoryRaw};
 use crate::error::Result;
 use crate::video::ascii_font::FONT_8X16;
 
@@ -30,10 +30,30 @@ pub fn video_run(screen: &mut Screen) -> Result {
     const HEIGHT: usize = 1080;
 
     let mut fs = Fs::new()?;
-    let mut file = fs.open_file(cstr16!("1080p\\video.qois"))?;
-    mp_draw(screen, &mut file, WIDTH, HEIGHT)?;
+    let file = fs.open_file(cstr16!("1080p\\video.qois"))?;
 
-    Ok(())
+    // 渲染路径矩阵（\palyer.toml）：
+    //   blt    → 单线程走 GOP Blt 引擎
+    //   direct → 原来的多核直写
+    match crate::config::effective_render() {
+        crate::config::RenderMode::Blt => blt_loop(screen, file, WIDTH, HEIGHT),
+        _ => {
+            let mut file = file;
+            mp_draw(screen, &mut file, WIDTH, HEIGHT)
+        }
+    }
+}
+
+/// 单线程 Blt 播放：`VideoMemoryRaw` 预解码全部帧（含 RGBA→BGRA），
+/// 每帧经 `upload_frame` 交给 GOP Blt 引擎。牺牲多核并行，换引擎搬运。
+fn blt_loop(screen: &mut Screen, file: RegularFile, width: usize, height: usize) -> Result {
+    let mut video = VideoMemoryRaw::new(file)?;
+    loop {
+        match video.next_frame() {
+            Some(frame) => screen.upload_frame(width, height, frame)?,
+            None => video.rewind(),
+        }
+    }
 }
 
 fn draw_once(fs: &mut Fs, screen: &mut Screen, path: &CStr16, blt_buf: &mut [BltPixel]) -> Result {

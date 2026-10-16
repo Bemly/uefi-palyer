@@ -306,6 +306,21 @@ pub fn run(screen: &mut Screen) -> Result {
         }
     }
 
+    // ---- XSAVE 预置：固件常不开 CR4.OSXSAVE，会让 AVX 系全程 SKIP ----
+    // OVMF/EDK2 与多台真机固件实测都不动 CR4.OSXSAVE（=0），而
+    // CPUID.1:ECX.OSXSAVE 是该位的镜像，于是 `check_avx_support` 门控恒假、
+    // AVX/AVX2/AVX512 行全 SKIP。这里报告**开机采到的固件原状态**（未被
+    // 工具污染），再按需自行开启（CPL0 可直接写 CR4/XCR0）。
+    let fw_osxsave = crate::diag::common::firmware_osxsave();
+    crate::diag::common::ensure_xsave_enabled();
+    tline!(
+        report,
+        screen,
+        "xsave: firmware OSXSAVE={} | now={} (tool sets CR4.OSXSAVE+XCR0 when firmware left it off)",
+        match fw_osxsave { Some(true) => "on", Some(false) => "off", None => "unk" },
+        if crate::diag::common::osxsave_on() { "on" } else { "off" }
+    );
+
     // ---- SIMD 支持度（全指令集矩阵） ----
     let f = cpuid_simd();
     tline!(report, screen, "-- SIMD cpuid --");

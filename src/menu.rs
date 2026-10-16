@@ -9,7 +9,7 @@ use core::time::Duration;
 
 use uefi::boot::stall;
 
-use crate::diag::common::{flush_keys, pause_return, wait_key};
+use crate::diag::common::{flush_keys, pause_return, wait_key_ex};
 use crate::diag::registry::{Entry, ITEMS};
 use crate::error::{handle_fatal, NyaStatus, Result};
 use crate::graphics::Screen;
@@ -44,19 +44,27 @@ fn run_shared(screen: &mut Screen, f: fn(&mut Screen) -> Result, fatal: bool) {
     }
 }
 
+/// 兜底比对：部分固件把扫描码/高位塞进 unicode_char（如数字键给 0x8038
+/// 而非 0x0038），直接比字符就全线 Unknown。这里再拿低 8 位/低 7 位试一次。
+fn key_match(want: char, key: char, raw: u16) -> bool {
+    want == key
+        || want == ((raw & 0xFF) as u8 as char).to_ascii_lowercase()
+        || want == ((raw & 0x7F) as u8 as char).to_ascii_lowercase()
+}
+
 pub fn run_menu(mut screen: Screen) -> ! {
     loop {
         draw_menu(&mut screen);
         flush_keys();
-        let key = wait_key();
+        let (key, raw) = wait_key_ex();
 
-        if key == 'r' {
+        if key_match('r', key, raw) {
             uefi::runtime::reset(uefi::runtime::ResetType::COLD, uefi::Status::SUCCESS, None);
         }
 
         let mut matched = false;
         for item in ITEMS {
-            if item.key == key {
+            if key_match(item.key, key, raw) {
                 matched = true;
                 match item.run {
                     Entry::Shared(f) => run_shared(&mut screen, f, item.fatal_on_error),
@@ -81,7 +89,11 @@ pub fn run_menu(mut screen: Screen) -> ! {
         }
 
         if !matched {
-            screen.draw_str("Unknown key, try again.");
+            // 带上原始键值：固件若把扫描码塞进 unicode_char，这里能看出来。
+            screen.draw_str(&alloc::format!(
+                "Unknown key: code U+{:04X} ('{}') - try again.",
+                raw, key
+            ));
             stall(Duration::from_millis(500));
         }
     }

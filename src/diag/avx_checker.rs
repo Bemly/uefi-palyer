@@ -5,6 +5,16 @@ use crate::error::Result;
 use crate::graphics::Screen;
 
 pub fn run(screen: &mut Screen) -> Result {
+    // 固件常不开 CR4.OSXSAVE（OVMF 与多台真机实测）；报告开机采到的原状态，
+    // 再按需开启。与 hw_bench（菜单 8）一致，免得 7 说不可用、8 却测出来。
+    let fw = crate::diag::common::firmware_osxsave();
+    crate::diag::common::ensure_xsave_enabled();
+    emit!(
+        screen,
+        "XSAVE: firmware OSXSAVE={} | now={}",
+        match fw { Some(true) => "on", Some(false) => "off", None => "unk" },
+        if crate::diag::common::osxsave_on() { "on" } else { "off" }
+    );
     if check_avx_support() {
         // 此时可以安全使用 AVX 指令
         emit!(screen, "AVX is enabled and safe to use.");

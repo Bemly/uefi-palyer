@@ -10,15 +10,27 @@ shiguredo_mp4 = { version = "2025.4.0", default-features = false }
 # 图像处理类
 qoicoubeh = { version = "0.5.0", default-features = false, features = ["alloc"] }
 u8g2-fonts = { version = "0.7.2", features = ["embedded_graphics_textstyle"] }
-embedded-graphics-gop = "0.4.2"
 embedded-graphics = "0.8.1"
-# 基础框架类
-uefi = { version = "0.36.1", features = ["logger","alloc","global_allocator","panic_handler"] }
-log = "0.4.29"
+# 基础框架类（版本与 Sprout 对齐：uefi 0.41.0 / uefi-raw 0.17.0）
+uefi = { version = "0.41.0", features = ["logger", "alloc", "global_allocator", "panic_handler"] }
+uefi-raw = "0.17.0"
+log = "0.4.34"
+anyhow = { version = "1.0.104", default-features = false }
+# 配置类（与 Sprout 同款；toml 1.x 已支持 no_std）
+toml = { version = "1.1.6", default-features = false, features = ["serde", "parse"] }
+serde = { version = "1.0.229", default-features = false, features = ["alloc", "derive"] }
 # 信息读取类
 raw-cpuid = "11.6.0"
 dmidecode = { version = "1.0.0", default-features = false }
+# 引导/加载逻辑复用 Sprout（git submodule）。注意 edera-sprout-boot 是 bin，不可依赖。
+edera-sprout-config = { path = "third_party/sprout/crates/config" }
+edera-sprout-eficore = { path = "third_party/sprout/crates/eficore" }
+edera-sprout-bls = { path = "third_party/sprout/crates/bls" }
+edera-sprout-parsing = { path = "third_party/sprout/crates/parsing" }
 
+# Sprout 注释：UEFI target 上低优化会踩优化 pass 的坑，dev 也要 opt-level>=2
+[profile.dev]
+opt-level = 2
 
 [profile.release]
 opt-level = 3
