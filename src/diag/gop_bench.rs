@@ -4,7 +4,9 @@
 //! - 基线（搬迁自 hw_bench）：整屏 VideoFill、BufferToVideo、framebuffer 直写；
 //! - 定标：1/4 面积 BLT/Fill，对比整屏，分离引擎固定开销与像素速率；
 //! - 瓶颈：单核 vs 多核显存填充（扩展比）、CPU 端像素换色吞吐、
-//!   最后按数字给瓶颈归因（传输/引擎/CPU/并行效率）。
+//!   动画帧率矩阵（核数 × 限帧），最后按数字给瓶颈归因；
+//! - 数据面：雪花屏（不可压缩数据）vs 纯色、GPU 内拷、显存回读，
+//!   分离数据相关性、GPU 内路、回读不对称。
 //!
 //! x86_64 only（RDTSC 计时 + MP 多核），由调用方保证。
 
@@ -403,6 +405,212 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
         );
     }
 
+    // ---- 雪花 vs 纯色 + GPU 内拷 + 回读 ----
+    // 纯色填充只考引擎（可走捷径），雪花屏逼整条数据通路搬足字节；
+    // VideoToVideo 是纯 GPU 内拷（不经过 CPU），回读是反方向。
+    // 四向对比 = CPU 写路 vs GPU 内路 vs BLT 引擎 vs 回读。
+    let stride_bytes = stride * 4;
+    let srow = w * 4;
+
+    // 雪花生成（CPU 程序化内容成本，xorshift32，种子运行时取防折叠）。
+    const SNOW_N: u64 = 3;
+    let mut snow = vec![0u8; fb_bytes];
+    let t0 = rdtsc();
+    let mut rng = (rdtsc() as u32) | 1;
+    for _ in 0..SNOW_N {
+        let mut i = 0;
+        while i + 4 <= fb_bytes {
+            rng ^= rng.wrapping_shl(13);
+            rng ^= rng.wrapping_shr(17);
+            rng ^= rng.wrapping_shl(5);
+            snow[i..i + 4].copy_from_slice(&rng.to_le_bytes());
+            i += 4;
+        }
+        core::hint::black_box(snow.as_ptr());
+    }
+    let dt = rdtsc() - t0;
+    tline!(
+        report,
+        screen,
+        "gop snow gen (xorshift): {:.1} MB/s",
+        (SNOW_N * fb_bytes as u64) as f64 * tps as f64 / (dt as f64 * 1024.0 * 1024.0)
+    );
+
+    // 雪花直写 vs 纯色直写。方法论：交替计时（ABAB…各 10 轮），
+    // 杀掉“先测吃亏”的时间漂移 bias——之前固定先纯色后雪花，
+    // warmth/TLB/睿频爬坡全算在雪花头上，曾报出 +76%/-27% 的假相关。
+    // 结构性差异保留：纯色=纯写无源读，雪花=读+写，差值≈源读流成本。
+    const SNOW_PRESENT_N: u64 = 10;
+    {
+        let mut fb = screen.get_gop().frame_buffer();
+        let dst = fb.as_mut_ptr();
+        for _ in 0..2 {
+            unsafe {
+                let mut i = 0;
+                while i + 8 <= fb_bytes {
+                    (dst.add(i) as *mut u64).write_volatile(0x0011_2233_0011_2233);
+                    i += 8;
+                }
+            }
+            let s = core::hint::black_box(snow.as_ptr());
+            unsafe { copy_rows(dst, stride_bytes, s, srow, 0, h) };
+        }
+    }
+    let mut dt_solid = 0u64;
+    let mut dt_snow = 0u64;
+    {
+        let mut fb = screen.get_gop().frame_buffer();
+        let dst = fb.as_mut_ptr();
+        for _ in 0..SNOW_PRESENT_N {
+            let t = rdtsc();
+            unsafe {
+                let mut i = 0;
+                while i + 8 <= fb_bytes {
+                    (dst.add(i) as *mut u64).write_volatile(0x0011_2233_0011_2233);
+                    i += 8;
+                }
+            }
+            dt_solid += rdtsc() - t;
+            let t = rdtsc();
+            let s = core::hint::black_box(snow.as_ptr());
+            unsafe { copy_rows(dst, stride_bytes, s, srow, 0, h) };
+            dt_snow += rdtsc() - t;
+        }
+    }
+    let dt = dt_snow;
+    let snow_dw_fps = (SNOW_PRESENT_N as f64 * tps as f64) / dt.max(1) as f64;
+    let snow_dw_mbs =
+        (SNOW_PRESENT_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+    let solid_dw_fps = (SNOW_PRESENT_N as f64 * tps as f64) / dt_solid.max(1) as f64;
+    tline!(
+        report,
+        screen,
+        "gop snow direct-write: {:.1} fps ({:.1} MB/s) vs solid {:.1} fps ({:+.0}%)",
+        snow_dw_fps,
+        snow_dw_mbs,
+        solid_dw_fps,
+        (snow_dw_fps - solid_dw_fps) / solid_dw_fps.max(0.01) * 100.0
+    );
+
+    // 雪花上屏 vs 纯色上屏：同样交替计时，杀时间漂移。
+    let mut snow_blt = vec![BltPixel::new(0, 0, 0); w * h];
+    {
+        let mut rng2 = (rdtsc() as u32) | 1;
+        for p in snow_blt.iter_mut() {
+            rng2 ^= rng2.wrapping_shl(13);
+            rng2 ^= rng2.wrapping_shr(17);
+            rng2 ^= rng2.wrapping_shl(5);
+            *p = BltPixel::new(
+                (rng2 & 0xFF) as u8,
+                ((rng2 >> 8) & 0xFF) as u8,
+                ((rng2 >> 16) & 0xFF) as u8,
+            );
+        }
+    }
+    let solid_blt = vec![BltPixel::new(0x11, 0x22, 0x33); w * h];
+    for _ in 0..2 {
+        screen.get_gop().blt(BltOp::BufferToVideo {
+            buffer: &solid_blt,
+            src: BltRegion::Full,
+            dest: (0, 0),
+            dims: (w, h),
+        })?;
+        screen.get_gop().blt(BltOp::BufferToVideo {
+            buffer: &snow_blt,
+            src: BltRegion::Full,
+            dest: (0, 0),
+            dims: (w, h),
+        })?;
+    }
+    const SNOW_BLT_N: u64 = 10;
+    let mut dt_solid = 0u64;
+    let mut dt_snow = 0u64;
+    for _ in 0..SNOW_BLT_N {
+        let t = rdtsc();
+        screen.get_gop().blt(BltOp::BufferToVideo {
+            buffer: &solid_blt,
+            src: BltRegion::Full,
+            dest: (0, 0),
+            dims: (w, h),
+        })?;
+        dt_solid += rdtsc() - t;
+        let t = rdtsc();
+        screen.get_gop().blt(BltOp::BufferToVideo {
+            buffer: &snow_blt,
+            src: BltRegion::Full,
+            dest: (0, 0),
+            dims: (w, h),
+        })?;
+        dt_snow += rdtsc() - t;
+    }
+    let solid_blt_fps = (SNOW_BLT_N as f64 * tps as f64) / dt_solid.max(1) as f64;
+    let dt = dt_snow;
+    let snow_blt_fps = (SNOW_BLT_N as f64 * tps as f64) / dt.max(1) as f64;
+    tline!(
+        report,
+        screen,
+        "gop snow BufferToVideo: {:.1} fps vs solid {:.1} fps ({:+.0}%)",
+        snow_blt_fps,
+        solid_blt_fps,
+        (snow_blt_fps - solid_blt_fps) / solid_blt_fps.max(0.01) * 100.0
+    );
+    drop(solid_blt);
+    drop(snow_blt);
+    drop(snow);
+
+    // GPU 内拷：上下半乒乓对拷（不用自拷——固件可能优化掉同区拷贝，
+    // 对拷保证 GPU 真搬数据）。每轮搬 2 个半屏 = 1 整屏字节。
+    let qh = h / 2;
+    const V2V_N: u64 = 20;
+    let t0 = rdtsc();
+    for _ in 0..V2V_N {
+        screen.get_gop().blt(BltOp::VideoToVideo {
+            src: (0, 0),
+            dest: (0, qh),
+            dims: (w, qh),
+        })?;
+        screen.get_gop().blt(BltOp::VideoToVideo {
+            src: (0, qh),
+            dest: (0, 0),
+            dims: (w, qh),
+        })?;
+    }
+    let dt = rdtsc() - t0;
+    let v2v_fps = (V2V_N as f64 * tps as f64) / dt.max(1) as f64;
+    let v2v_mbs = (V2V_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+    tline!(
+        report,
+        screen,
+        "gop VideoToVideo pingpong: {:.1} fps, {:.1} MB/s",
+        v2v_fps,
+        v2v_mbs
+    );
+
+    // 回读（显存 -> 内存），通常是最慢的方向，少测几次。
+    let mut readback = vec![BltPixel::new(0, 0, 0); w * h];
+    const RDB_N: u64 = 5;
+    let t0 = rdtsc();
+    for _ in 0..RDB_N {
+        screen.get_gop().blt(BltOp::VideoToBltBuffer {
+            buffer: &mut readback,
+            src: (0, 0),
+            dest: BltRegion::Full,
+            dims: (w, h),
+        })?;
+    }
+    let dt = rdtsc() - t0;
+    core::hint::black_box(readback.as_ptr());
+    let rdb_fps = (RDB_N as f64 * tps as f64) / dt.max(1) as f64;
+    let rdb_mbs = (RDB_N * fb_bytes as u64) as f64 * tps as f64 / (dt.max(1) as f64 * 1024.0 * 1024.0);
+    tline!(
+        report,
+        screen,
+        "gop VideoToBltBuffer readback: {:.1} fps, {:.1} MB/s",
+        rdb_fps,
+        rdb_mbs
+    );
+    drop(readback);
+
     // ---- 瓶颈归因（启发式，看数字说话） ----
     // 传输 vs 引擎：Fill 不搬数据只考引擎，BLT 要搬数据。
     if blt_mbs < fb_mbs * 0.5 {
@@ -438,6 +646,62 @@ pub fn run_section(report: &mut Vec<String>, screen: &mut Screen, tps: u64) -> R
             "verdict: pipeline blit-bound (convert {:.0} >= blit {:.0} MB/s)",
             conv_mbs,
             blt_mbs
+        );
+    }
+
+    // GPU 内拷 vs CPU 写路。
+    if v2v_mbs > fb_mbs * 1.25 {
+        tline!(
+            report,
+            screen,
+            "verdict: gpu fabric faster than CPU write path (v2v {:.0} > direct {:.0} MB/s)",
+            v2v_mbs,
+            fb_mbs
+        );
+    } else if fb_mbs > v2v_mbs * 1.5 {
+        tline!(
+            report,
+            screen,
+            "verdict: copy engine slower than CPU write path (v2v {:.0} < direct {:.0} MB/s, odd?)",
+            v2v_mbs,
+            fb_mbs
+        );
+    } else {
+        tline!(
+            report,
+            screen,
+            "verdict: gpu-copy ~= cpu-write (v2v {:.0} ~= direct {:.0} MB/s)",
+            v2v_mbs,
+            fb_mbs
+        );
+    }
+    // 回读不对称（回读通常慢一个数量级，抓屏/录制类场景的真瓶颈）。
+    tline!(
+        report,
+        screen,
+        "verdict: readback {:.0} MB/s vs write {:.0} MB/s (ratio {:.1}x)",
+        rdb_mbs,
+        fb_mbs.max(0.01),
+        fb_mbs.max(0.01) / rdb_mbs.max(0.01)
+    );
+    // 数据相关性：BLT 引擎是否在乎内容。雪花不可压缩、无捷径可走，
+    // 若与纯色差 <10% → 引擎是 dumb pipe；直写侧雪花慢的那部分是
+    // “多一路内存源读流”的成本，不是内容成本（纯色直写是纯写无源读）。
+    let blt_delta = (snow_blt_fps - solid_blt_fps) / solid_blt_fps.max(0.01);
+    if blt_delta.abs() < 0.10 {
+        tline!(
+            report,
+            screen,
+            "verdict: blit data-independent (snow {:+.0}% — dumb pipe)",
+            blt_delta * 100.0
+        );
+    } else {
+        // 超带先怀疑方法论/宿主机负载抖动（虚拟化下方差大），裸机复测为准。
+        tline!(
+            report,
+            screen,
+            "verdict: snow vs solid blit {:+.0}% — exceeds 10% band, suspect host-load noise (re-check on bare metal)",
+            blt_delta * 100.0
         );
     }
 
