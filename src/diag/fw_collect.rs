@@ -48,6 +48,11 @@ pub fn run(screen: &mut Screen) -> Result {
         report.push(s);
     }
 
+    // AVX 可用性摘要（与菜单 8 的完整 SIMD 压测对应，这里只记结论，
+    // 免得三台机器对比时还要去翻 HWBENCH 文件）。
+    #[cfg(target_arch = "x86_64")]
+    cpu_simd_summary(&mut report, screen);
+
     tline!(report, screen, "-- smbios --");
     smbios_collect(&mut report, screen);
     tline!(report, screen, "-- pci --");
@@ -66,6 +71,43 @@ pub fn run(screen: &mut Screen) -> Result {
 }
 
 // ---------- SMBIOS ----------
+
+/// CPU SIMD 可用性摘要：AVX/AVX2/AVX512F 硬件位 + OSXSAVE + 综合可用判定。
+/// 综合判定复用 `avx_checker`（内部已做 OSXSAVE 门控，XCR0 读取不会 #UD）。
+/// 读 7 号叶前用最大叶号门控，老 CPU 直接读会回落误报，此时按无硬件处理。
+#[cfg(target_arch = "x86_64")]
+fn cpu_simd_summary(report: &mut Vec<String>, screen: &mut Screen) {
+    use core::arch::x86_64::{__cpuid, __cpuid_count};
+
+    fn yn(b: bool) -> &'static str {
+        if b {
+            "YES"
+        } else {
+            "no"
+        }
+    }
+
+    let c1 = __cpuid(1);
+    let avx_hw = c1.ecx & (1 << 28) != 0;
+    let osxsave = c1.ecx & (1 << 27) != 0;
+    let (mut avx2_hw, mut avx512f_hw) = (false, false);
+    if crate::diag::common::cpuid_max_basic() >= 7 {
+        let c7 = __cpuid_count(7, 0);
+        avx2_hw = c7.ebx & (1 << 5) != 0;
+        avx512f_hw = c7.ebx & (1 << 16) != 0;
+    }
+    let usable = crate::diag::avx_checker::check_avx_support();
+    tline!(
+        report,
+        screen,
+        "cpu simd: AVX-HW {} | AVX2-HW {} | AVX512F-HW {} | OSXSAVE {} | AVX-usable {}",
+        yn(avx_hw),
+        yn(avx2_hw),
+        yn(avx512f_hw),
+        yn(osxsave),
+        if usable { "YES" } else { "NO" }
+    );
+}
 
 fn smbios_collect(report: &mut Vec<String>, screen: &mut Screen) {
     let Some(address) = find_smbios_address() else {

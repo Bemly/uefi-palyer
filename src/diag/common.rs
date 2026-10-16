@@ -117,3 +117,16 @@ pub fn find_smbios_address() -> Option<usize> {
     });
     found
 }
+
+/// CPUID 最大基本功能号（EAX=0）。读 7 号叶前必须先门控：
+/// 老 CPU 没有 7 号叶，直接读会回落返回最大叶内容造成误报。
+#[cfg(target_arch = "x86_64")]
+pub fn cpuid_max_basic() -> u32 {
+    core::arch::x86_64::__cpuid(0).eax
+}
+
+/// CPUID 最大扩展功能号（EAX=0x80000000）。读 0x80000001 叶前先门控，同上。
+#[cfg(target_arch = "x86_64")]
+pub fn cpuid_max_extended() -> u32 {
+    core::arch::x86_64::__cpuid(0x8000_0000).eax
+}

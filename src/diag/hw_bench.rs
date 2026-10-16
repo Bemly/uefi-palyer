@@ -43,39 +43,105 @@ macro_rules! tline {
 }
 
 // ---------- CPUID ----------
+//
+// 全指令集矩阵：leaf1（ECX/EDX）+ leaf7（EBX/ECX/EDX，子叶0）
+// + leaf7 子叶1（EAX）+ 扩展叶 0x80000001（ECX/EDX）。
+// 只收 SIMD/向量/密码/位操纵相关位，控制流（CET/INVPCID 等）不管。
+// 位号依据 Intel SDM Vol.2A CPUID 与 AMD APM Vol.3 附录。
+// 读 7 号叶/扩展叶前用最大叶号门控，老 CPU 直接读会回落误报。
 
+/// 分组展示用的 (名字, 是否支持) 表，按叶分组、组内按位号排序。
 struct SimdCpuid {
-    sse: bool,
     sse2: bool,
-    sse3: bool,
-    pclmulqdq: bool,
-    ssse3: bool,
-    fma: bool,
-    sse41: bool,
-    sse42: bool,
-    aes: bool,
-    osxsave: bool,
-    avx_hw: bool,
     avx2_hw: bool,
+    avx512f_hw: bool,
+    osxsave: bool,
+    /// 有 7 号叶（可以信任下面的 leaf7_*）。
+    has_leaf7: bool,
+    /// 有扩展叶（可以信任下面的 ext_*）。
+    has_ext: bool,
+    leaf7_ebx: u32,
+    leaf7_ecx: u32,
+    leaf7_edx: u32,
+    leaf7s1_eax: u32,
+    has_leaf7s1: bool,
+    ext_ecx: u32,
+    ext_edx: u32,
+    leaf1_ecx: u32,
+    leaf1_edx: u32,
 }
 
 fn cpuid_simd() -> SimdCpuid {
     // __cpuid 在新版 Rust 里是 safe fn，无需 unsafe。
     let c1 = __cpuid(1);
-    let c7 = __cpuid_count(7, 0);
+    let max_basic = crate::diag::common::cpuid_max_basic();
+    let max_ext = crate::diag::common::cpuid_max_extended();
+    let has_leaf7 = max_basic >= 7;
+    let has_ext = max_ext >= 0x8000_0001;
+    let (mut b7, mut c7, mut d7) = (0, 0, 0);
+    if has_leaf7 {
+        let r = __cpuid_count(7, 0);
+        b7 = r.ebx;
+        c7 = r.ecx;
+        d7 = r.edx;
+    }
+    // 子叶 1 是否存在看 7 号叶 EAX（最大子叶号）。
+    let has_leaf7s1 = has_leaf7 && __cpuid_count(7, 0).eax >= 1;
+    let mut s1eax = 0;
+    if has_leaf7s1 {
+        s1eax = __cpuid_count(7, 1).eax;
+    }
+    let (mut xc, mut xd) = (0, 0);
+    if has_ext {
+        let r = __cpuid(0x8000_0001);
+        xc = r.ecx;
+        xd = r.edx;
+    }
     SimdCpuid {
-        sse: c1.edx & (1 << 25) != 0,
         sse2: c1.edx & (1 << 26) != 0,
-        sse3: c1.ecx & (1 << 0) != 0,
-        pclmulqdq: c1.ecx & (1 << 1) != 0,
-        ssse3: c1.ecx & (1 << 9) != 0,
-        fma: c1.ecx & (1 << 12) != 0,
-        sse41: c1.ecx & (1 << 19) != 0,
-        sse42: c1.ecx & (1 << 20) != 0,
-        aes: c1.ecx & (1 << 25) != 0,
+        avx2_hw: b7 & (1 << 5) != 0,
+        avx512f_hw: b7 & (1 << 16) != 0,
         osxsave: c1.ecx & (1 << 27) != 0,
-        avx_hw: c1.ecx & (1 << 28) != 0,
-        avx2_hw: c7.ebx & (1 << 5) != 0,
+        has_leaf7,
+        has_ext,
+        leaf7_ebx: b7,
+        leaf7_ecx: c7,
+        leaf7_edx: d7,
+        leaf7s1_eax: s1eax,
+        has_leaf7s1,
+        ext_ecx: xc,
+        ext_edx: xd,
+        leaf1_ecx: c1.ecx,
+        leaf1_edx: c1.edx,
+    }
+}
+
+/// 按叶分组打印。叶不存在时整组标 N/A，不逐位误报。
+fn print_group(
+    report: &mut Vec<String>,
+    screen: &mut Screen,
+    title: &str,
+    ok: bool,
+    regs: u32,
+    bits: &[(u8, &'static str)],
+) {
+    if !ok {
+        tline!(report, screen, "-- {}: N/A (leaf missing) --", title);
+        return;
+    }
+    tline!(report, screen, "-- {} --", title);
+    let mut line = String::new();
+    for (i, (bit, name)) in bits.iter().enumerate() {
+        let on = regs & (1 << bit) != 0;
+        line.push_str(&format!("{}:{} ", name, yn(on)));
+        // 屏显是等宽点阵，一行塞太多会换行难看，4 个一组。
+        if i % 4 == 3 {
+            tline!(report, screen, "  {}", line.trim_end());
+            line.clear();
+        }
+    }
+    if !line.is_empty() {
+        tline!(report, screen, "  {}", line.trim_end());
     }
 }
 
@@ -171,6 +237,30 @@ unsafe fn avx2_int_add_test(seed: u32) -> bool {
     }
 }
 
+/// AVX512 整数加法实测（512 位整数要 AVX512F，调用前必须同时满足
+/// 硬件位 + `check_avx_support()` + XCR0 的 SSE/AVX/OPMASK/ZMM 五位全开，
+/// 缺一个执行就 #UD）。约束同 SSE 版（asm! 显式 zmm_reg 防标量化）。
+#[target_feature(enable = "avx512f")]
+unsafe fn avx512_int_add_test(seed: u32) -> bool {
+    use core::arch::x86_64::{_mm512_set1_epi32, _mm512_storeu_si512};
+    unsafe {
+        let a = _mm512_set1_epi32(seed as i32);
+        let b = _mm512_set1_epi32(100);
+        let mut x = a;
+        let y = b;
+        // EVEX 全掩码：vpaddd zmm, zmm, zmm  <=>  16 lane 相加（wrapping）。
+        asm!(
+            "vpaddd {x}, {x}, {y}",
+            x = inlateout(zmm_reg) x,
+            y = in(zmm_reg) y,
+            options(pure, nomem, nostack, preserves_flags),
+        );
+        let mut out = [0i32; 16];
+        _mm512_storeu_si512(out.as_mut_ptr() as *mut _, x);
+        out.iter().all(|&v| v == (seed as i32).wrapping_add(100))
+    }
+}
+
 // ---------- 计时 ----------
 
 #[inline(always)]
@@ -216,40 +306,90 @@ pub fn run(screen: &mut Screen) -> Result {
         }
     }
 
-    // ---- SIMD 支持度 ----
+    // ---- SIMD 支持度（全指令集矩阵） ----
     let f = cpuid_simd();
     tline!(report, screen, "-- SIMD cpuid --");
-    for (name, on) in [
-        ("SSE", f.sse),
-        ("SSE2", f.sse2),
-        ("SSE3", f.sse3),
-        ("SSSE3", f.ssse3),
-        ("SSE4.1", f.sse41),
-        ("SSE4.2", f.sse42),
-        ("PCLMULQDQ", f.pclmulqdq),
-        ("AES-NI", f.aes),
-        ("FMA", f.fma),
-        ("AVX(hw)", f.avx_hw),
-        ("AVX2(hw)", f.avx2_hw),
-        ("OSXSAVE", f.osxsave),
-    ] {
-        tline!(report, screen, "  {:<10} {}", name, yn(on));
-    }
+    print_group(
+        &mut report, screen, "leaf1 ECX", true, f.leaf1_ecx,
+        &[
+            (0, "SSE3"), (1, "PCLMULQDQ"), (9, "SSSE3"), (12, "FMA"),
+            (13, "CMPXCHG16B"), (19, "SSE4.1"), (20, "SSE4.2"), (22, "MOVBE"),
+            (23, "POPCNT"), (25, "AES-NI"), (26, "XSAVE"), (27, "OSXSAVE"),
+            (28, "AVX"), (29, "F16C"), (30, "RDRAND"),
+        ],
+    );
+    print_group(
+        &mut report, screen, "leaf1 EDX", true, f.leaf1_edx,
+        &[(23, "MMX"), (24, "FXSR"), (25, "SSE"), (26, "SSE2")],
+    );
+    print_group(
+        &mut report, screen, "leaf7 EBX", f.has_leaf7, f.leaf7_ebx,
+        &[
+            (0, "FSGSBASE"), (3, "BMI1"), (5, "AVX2"), (8, "BMI2"),
+            (16, "AVX512F"), (17, "AVX512DQ"), (18, "RDSEED"), (19, "ADX"),
+            (20, "SMAP"), (21, "AVX512IFMA"), (23, "CLFLUSHOPT"),
+            (26, "AVX512PF"), (27, "AVX512ER"), (28, "AVX512CD"),
+            (29, "SHA"), (30, "AVX512BW"), (31, "AVX512VL"),
+        ],
+    );
+    print_group(
+        &mut report, screen, "leaf7 ECX", f.has_leaf7, f.leaf7_ecx,
+        &[
+            (1, "AVX512VBMI"), (8, "GFNI"), (9, "VAES"),
+            (10, "VPCLMULQDQ"), (11, "AVX512VNNI"), (12, "AVX512BITALG"),
+            (14, "AVX512VPOPCNTDQ"),
+        ],
+    );
+    print_group(
+        &mut report, screen, "leaf7 EDX", f.has_leaf7, f.leaf7_edx,
+        &[
+            (2, "AVX5124VNNIW"), (3, "AVX5124FMAPS"), (8, "AVX512VP2INTERSECT"),
+            (22, "AMX-BF16"), (23, "AVX512-FP16"), (24, "AMX-TILE"),
+            (25, "AMX-INT8"),
+        ],
+    );
+    print_group(
+        &mut report, screen, "leaf7.1 EAX", f.has_leaf7s1, f.leaf7s1_eax,
+        &[(4, "AVX-VNNI"), (5, "AVX512-BF16"), (23, "AVX-IFMA")],
+    );
+    print_group(
+        &mut report, screen, "ext 80000001h ECX", f.has_ext, f.ext_ecx,
+        &[(5, "LZCNT"), (6, "SSE4a"), (8, "PREFETCHW"), (16, "FMA4"), (21, "TBM")],
+    );
+    print_group(
+        &mut report, screen, "ext 80000001h EDX", f.has_ext, f.ext_edx,
+        &[(22, "MMXEXT"), (25, "FFXSR"), (30, "3DNOWEXT"), (31, "3DNOW")],
+    );
 
     // XCR0：只有 OSXSAVE 开了才敢读，否则 #UD。
+    // 除 SSE/AVX 状态位外再看 OPMASK/ZMM 位——AVX512 能否真跑，
+    // 硬件位只是必要条件，XCR0 没开对应状态执行就 #UD。
+    let mut xcr0: u64 = 0;
     if f.osxsave {
-        let xcr0 = unsafe { _xgetbv(0) };
+        xcr0 = unsafe { _xgetbv(0) };
         tline!(
             report,
             screen,
-            "xcr0: SSE-state={} AVX-state={} XCR0={:#x}",
+            "xcr0: SSE={} AVX={} OPMASK={} ZMM_Hi256={} Hi16_ZMM={} XCR0={:#x}",
             yn(xcr0 & (1 << 1) != 0),
             yn(xcr0 & (1 << 2) != 0),
+            yn(xcr0 & (1 << 5) != 0),
+            yn(xcr0 & (1 << 6) != 0),
+            yn(xcr0 & (1 << 7) != 0),
             xcr0
         );
     } else {
         tline!(report, screen, "xcr0: SKIPPED (no OSXSAVE)");
     }
+    // AVX512 可用判定：硬件位 + XCR0 五位全开，缺一个都 #UD。
+    const ZMM_MASK: u64 = (1 << 1) | (1 << 2) | (1 << 5) | (1 << 6) | (1 << 7);
+    let avx512_usable = f.avx512f_hw && f.osxsave && xcr0 & ZMM_MASK == ZMM_MASK;
+    tline!(
+        report,
+        screen,
+        "AVX512-usable: {}",
+        if avx512_usable { "YES" } else { "NO" }
+    );
 
     // ---- SIMD 功能实测 ----
     tline!(report, screen, "-- SIMD exec test --");
@@ -269,6 +409,12 @@ pub fn run(screen: &mut Screen) -> Result {
         tline!(report, screen, "  AVX2 int add : {}", if ok { "PASS" } else { "FAIL" });
     } else {
         tline!(report, screen, "  AVX2 int add : SKIP (need AVX+XCR0+AVX2-hw)");
+    }
+    if avx512_usable {
+        let ok = unsafe { avx512_int_add_test(rdtsc() as u32) };
+        tline!(report, screen, "  AVX512 int add: {}", if ok { "PASS" } else { "FAIL" });
+    } else {
+        tline!(report, screen, "  AVX512 int add: SKIP (need AVX512F+XCR0-ZMM)");
     }
 
     // ---- 基准 ----
